@@ -3,7 +3,6 @@ package framework.paxos;
 import com.google.common.collect.Lists;
 import framework.Address;
 import framework.Client;
-import framework.Node;
 import framework.testing.StateGenerator;
 import framework.testing.StateGenerator.StateGeneratorBuilder;
 import framework.testing.Workload;
@@ -17,7 +16,6 @@ import framework.testing.runner.RunState;
 import framework.testing.search.Search;
 import framework.testing.search.SearchResults;
 import framework.testing.search.SearchState;
-import framework.testing.utils.Cloning;
 import framework.kvstore.KVStore;
 import framework.kvstore.KVStoreWorkload;
 import java.util.ArrayList;
@@ -96,15 +94,6 @@ public class PaxosTest extends BaseJUnitTest {
         }
     }
 
-    /* Run Test Helper Methods */
-
-    private long nodesSize() {
-        int total = 0;
-        for (Node node : runState.nodes()) {
-            total += Cloning.size(node);
-        }
-        return total;
-    }
 
     /* Tests */
 

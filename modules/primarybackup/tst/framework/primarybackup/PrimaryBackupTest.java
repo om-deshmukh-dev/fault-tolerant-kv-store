@@ -12,7 +12,7 @@ import framework.testing.MessageEnvelope;
 import framework.testing.StateGenerator;
 import framework.testing.StateGenerator.StateGeneratorBuilder;
 import framework.testing.StatePredicate;
-import framework.testing.TimeoutEnvelope;
+import framework.testing.TimerEnvelope;
 import framework.testing.Workload;
 import framework.testing.junit.BaseJUnitTest;
 import framework.testing.junit.PrettyTestName;
@@ -64,8 +64,8 @@ import static framework.kvstore.KVStoreWorkload.putAppendGetWorkload;
 import static framework.kvstore.KVStoreWorkload.putGetWorkload;
 import static framework.kvstore.KVStoreWorkload.putOk;
 import static framework.kvstore.KVStoreWorkload.simpleWorkload;
-import static framework.primarybackup.PingCheckTimeout.PING_CHECK_MILLIS;
-import static framework.primarybackup.PingTimeout.PING_MILLIS;
+import static framework.primarybackup.PingCheckTimer.PING_CHECK_MILLIS;
+import static framework.primarybackup.PingTimer.PING_MILLIS;
 import static framework.primarybackup.ViewServerTest.INITIAL_VIEWNUM;
 import static framework.primarybackup.ViewServerTest.ta;
 import static framework.primarybackup.ViewServerTest.vsa;
@@ -213,7 +213,7 @@ public class PrimaryBackupTest extends BaseJUnitTest {
      */
     private View getView() {
         runState.network().send(new MessageEnvelope(ta, vsa, new GetView()));
-        Either<MessageEnvelope, TimeoutEnvelope> p = null;
+        Either<MessageEnvelope, TimerEnvelope> p = null;
         try {
             p = runState.network().take(ta);
         } catch (InterruptedException e) {

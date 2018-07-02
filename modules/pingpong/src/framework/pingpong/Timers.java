@@ -1,11 +1,11 @@
 package framework.pingpong;
 
-import framework.Timeout;
+import framework.Timer;
 import framework.pingpong.PingApplication.Ping;
 import lombok.Data;
 
 @Data
-final class PingTimeout implements Timeout {
+final class PingTimer implements Timer {
     static final int RETRY_MILLIS = 10;
     private final Ping ping;
 }

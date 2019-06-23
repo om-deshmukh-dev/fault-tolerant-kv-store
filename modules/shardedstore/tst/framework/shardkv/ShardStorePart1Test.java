@@ -11,7 +11,10 @@ import framework.testing.junit.RunTests;
 import framework.testing.junit.SearchTests;
 import framework.testing.junit.TestPointValue;
 import framework.testing.junit.UnreliableTests;
+import framework.testing.search.Search;
 import framework.kvstore.KVStoreWorkload;
+import framework.shardmaster.ShardMaster.Join;
+import framework.shardmaster.ShardMaster.Leave;
 import framework.shardmaster.ShardMaster.Move;
 import framework.shardmaster.ShardMaster.Ok;
 import framework.shardmaster.ShardMaster.ShardConfig;
@@ -30,9 +33,12 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runners.MethodSorters;
 
+import static framework.testing.StatePredicate.CLIENTS_DONE;
 import static framework.testing.StatePredicate.RESULTS_OK;
+import static framework.testing.search.SearchResults.EndCondition.INVARIANT_VIOLATED;
 import static framework.kvstore.KVStoreWorkload.append;
 import static framework.kvstore.KVStoreWorkload.appendResult;
+import static framework.kvstore.KVStoreWorkload.appendsLinearizable;
 import static framework.kvstore.KVStoreWorkload.get;
 import static framework.kvstore.KVStoreWorkload.getResult;
 import static framework.kvstore.KVStoreWorkload.put;
@@ -449,5 +455,56 @@ public final class ShardStorePart1Test extends ShardStoreBaseTest {
         initSearchState.addClientWorker(client(2), w2);
 
         multiClientMultiGroupSearch();
+    }
+
+    private void randomSearch(int numServersPerGroup) {
+        setupStates(2, numServersPerGroup, 1, 2);
+
+        Workload ccWorkload = Workload.builder().commands(
+                new Join(1, servers(1, numServersPerGroup)),
+                new Join(2, servers(2, numServersPerGroup)), new Leave(1))
+                                      .results(new Ok(), new Ok(), new Ok())
+                                      .build();
+        initSearchState.addClientWorker(cca, ccWorkload);
+
+        Workload w1 = KVStoreWorkload.builder().commands(append("foo-1", "X"),
+                append("foo-1", "Y")).build();
+        initSearchState.addClientWorker(client(1), w1);
+
+        Workload w2 = KVStoreWorkload.builder().commands(append("foo-1", "Z"))
+                                     .build();
+        initSearchState.addClientWorker(client(2), w2);
+
+        Workload w3 = KVStoreWorkload.builder().commands(append("foo-2", "X"),
+                append("foo-2", "Y")).build();
+        initSearchState.addClientWorker(client(3), w3);
+
+        Workload w4 = KVStoreWorkload.builder().commands(append("foo-2", "Z"))
+                                     .build();
+        initSearchState.addClientWorker(client(4), w4);
+
+        searchSettings.maxDepth(1000).maxTimeSecs(20)
+                      .addInvariant(appendsLinearizable(client(1), client(2)))
+                      .addInvariant(appendsLinearizable(client(3), client(4)))
+                      .addInvariant(RESULTS_OK).addPrune(CLIENTS_DONE);
+
+        assertNotEndCondition(INVARIANT_VIOLATED,
+                Search.dfs(initSearchState, searchSettings));
+    }
+
+    @Test
+    @PrettyTestName("One server per group random search")
+    @Category(SearchTests.class)
+    @TestPointValue(20)
+    public void test13SingleServerRandomSearch() {
+        randomSearch(1);
+    }
+
+    @Test
+    @PrettyTestName("Multiple servers per group random search")
+    @Category(SearchTests.class)
+    @TestPointValue(20)
+    public void test14MultiServerRandomSearch() {
+        randomSearch(3);
     }
 }

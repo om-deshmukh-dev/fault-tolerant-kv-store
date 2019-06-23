@@ -3,6 +3,7 @@ package framework.kvstore;
 import framework.Address;
 import framework.Command;
 import framework.Result;
+import framework.testing.ClientWorker;
 import framework.testing.InfiniteWorkload;
 import framework.testing.StatePredicate;
 import framework.testing.Workload;
@@ -17,8 +18,10 @@ import framework.kvstore.KVStore.KeyNotFound;
 import framework.kvstore.KVStore.Put;
 import framework.kvstore.KVStore.PutOk;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -28,7 +31,7 @@ import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.commons.lang3.tuple.Pair;
 
-import static framework.testing.StatePredicate.resultsPredicate;
+import static framework.testing.StatePredicate.statePredicate;
 
 public abstract class KVStoreWorkload extends Workload {
     public static final String OK = "Ok", KEY_NOT_FOUND = "KeyNotFound";
@@ -254,36 +257,72 @@ public abstract class KVStoreWorkload extends Workload {
 
     /* KVStore-specific predicates */
 
-    private static boolean listInStrictPrefixOrder(List<String> l) {
-        for (int i = 0; i < l.size() - 1; i++) {
-            if (!l.get(i + 1).startsWith(l.get(i)) ||
-                    l.get(i + 1).equals(l.get(i))) {
-                return false;
-            }
-        }
-        return true;
-    }
+    /**
+     * Tests whether the results a group of clients get back from sending
+     * appends to the same key are linearizable. Assumes that the values being
+     * appended are non-empty.
+     *
+     * @param clientWorkers
+     *         the clients sending the appends; if this is null, the predicate
+     *         uses all ClientWorkers
+     */
+    private static StatePredicate appendsLinearizableInternal(
+            Iterable<Address> clientWorkers) {
+        return statePredicate(
+                "Sequence of appends to the same key is linearizable", s -> {
+                    List<String> allResults = new ArrayList<>();
 
-    public static final StatePredicate APPENDS_LINEARIZABLE = resultsPredicate(
-            "Sequence of appends to the same key is linearizable", rs -> {
-                List<String> allResults = new ArrayList<>();
+                    for (Address a : (clientWorkers == null ?
+                            s.clientWorkerAddresses() : clientWorkers)) {
+                        ClientWorker cw = s.clientWorker(a);
+                        Iterator<Command> cs = cw.sentCommands().iterator();
+                        Iterator<Result> rs = cw.results().iterator();
+                        while (cs.hasNext() && rs.hasNext()) {
+                            Command c = cs.next();
+                            Result r = rs.next();
 
-                // TODO: clean this up
-                for (List<Result> r : rs) {
-                    List<String> rp = new ArrayList<>();
-                    for (Result ar : r) {
-                        if (!(ar instanceof AppendResult)) {
+                            // Tests should never let this happen
+                            if (!(c instanceof Append)) {
+                                throw new RuntimeException(
+                                        "Client workers have non-Append Commands");
+                            }
+
+                            if (!(r instanceof AppendResult)) {
+                                return false;
+                            }
+
+                            Append append = (Append) c;
+                            AppendResult appendResult = (AppendResult) r;
+
+                            if (!appendResult.value()
+                                             .endsWith(append.value())) {
+                                return false;
+                            }
+
+                            allResults.add(appendResult.value());
+                        }
+                    }
+
+                    // Make sure each entry in allResults is a prefix of the next
+                    allResults.sort(Comparator.comparingInt(String::length));
+
+                    for (int i = 0; i < allResults.size() - 1; i++) {
+                        if (!allResults.get(i + 1)
+                                       .startsWith(allResults.get(i)) ||
+                                allResults.get(i + 1)
+                                          .equals(allResults.get(i))) {
                             return false;
                         }
-                        rp.add(((AppendResult) ar).value());
                     }
 
-                    if (!listInStrictPrefixOrder(rp)) {
-                        return false;
-                    }
-                    allResults.addAll(rp);
-                }
-                allResults.sort(Comparator.comparingInt(String::length));
-                return listInStrictPrefixOrder(allResults);
-            });
+                    return true;
+                });
+    }
+
+    public static StatePredicate appendsLinearizable(Address... clientWorkers) {
+        return appendsLinearizableInternal(Arrays.asList(clientWorkers));
+    }
+
+    public static final StatePredicate APPENDS_LINEARIZABLE =
+            appendsLinearizableInternal(null);
 }

@@ -7,6 +7,8 @@ import framework.testing.junit.TestPointValue;
 import framework.testing.junit.UnreliableTests;
 import framework.testing.search.Search;
 import framework.kvstore.KVStoreWorkload;
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.FixMethodOrder;
 import org.junit.Test;
@@ -19,8 +21,10 @@ import static framework.testing.StatePredicate.RESULTS_OK;
 import static framework.testing.search.SearchResults.EndCondition.INVARIANT_VIOLATED;
 import static framework.testing.search.SearchResults.EndCondition.SPACE_EXHAUSTED;
 import static framework.kvstore.KVStoreWorkload.APPENDS_LINEARIZABLE;
+import static framework.kvstore.KVStoreWorkload.append;
 import static framework.kvstore.KVStoreWorkload.appendAppendGet;
 import static framework.kvstore.KVStoreWorkload.appendDifferentKeyWorkload;
+import static framework.kvstore.KVStoreWorkload.appendResult;
 import static framework.kvstore.KVStoreWorkload.appendSameKeyWorkload;
 import static framework.kvstore.KVStoreWorkload.differentKeysInfiniteWorkload;
 import static framework.kvstore.KVStoreWorkload.put;
@@ -111,7 +115,7 @@ public final class ClientServerPart2Test extends ClientServerBaseTest {
     @TestPointValue(20)
     @Category({RunTests.class})
     public void test05GarbageCollection() throws InterruptedException {
-        int valueSize = 1000000, items = 10, iters = 2, numClients = 5;
+        int valueSize = 1000000, items = 5, iters = 3, numClients = 5;
 
         for (int c = 1; c <= numClients; c++) {
             runState.addClient(client(c));
@@ -126,23 +130,26 @@ public final class ClientServerPart2Test extends ClientServerBaseTest {
 
         // Now, add a bunch of large items
         runState.start(runSettings);
+        Map<String, String> kv = new HashMap<>();
         for (int i = 0; i < iters; i++) {
             for (int key = 0; key < items; key++) {
                 for (int c = 1; c <= numClients; c++) {
                     String k = String.format("client%s-key%s", c, key);
+                    String v = RandomStringUtils.randomAscii(valueSize);
+                    String nv = kv.getOrDefault(k, "") + v;
                     sendCommandAndCheck(runState.client(client(c)),
-                            put(k, RandomStringUtils.randomAscii(valueSize)),
-                            putOk());
+                            append(k, v), appendResult(nv));
+                    kv.put(k, nv);
                 }
             }
         }
         runState.stop();
 
-        long afterPutBytes = nodesSize();
+        long afterAppendBytes = nodesSize();
         System.out.println(
-                "Using " + readableSize(afterPutBytes) + " after puts.");
-        // Must at least have random values in memory at nodes (~45 MB)
-        assertTrue(afterPutBytes > valueSize * items * numClients);
+                "Using " + readableSize(afterAppendBytes) + " after appends.");
+        // Must at least have random values in memory at nodes (~34 MB)
+        assertTrue(afterAppendBytes > valueSize * items * numClients);
 
         // Clear memory
         runSettings.resetNetwork();

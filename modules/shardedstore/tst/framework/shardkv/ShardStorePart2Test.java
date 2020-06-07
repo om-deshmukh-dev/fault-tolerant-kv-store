@@ -9,7 +9,6 @@ import framework.testing.junit.RunTests;
 import framework.testing.junit.SearchTests;
 import framework.testing.junit.TestPointValue;
 import framework.testing.junit.UnreliableTests;
-import framework.testing.search.Search;
 import framework.kvstore.TransactionalKVStore.MultiGetResult;
 import framework.kvstore.TransactionalKVStoreWorkload;
 import framework.shardmaster.ShardMaster.Join;
@@ -187,9 +186,7 @@ public class ShardStorePart2Test extends ShardStoreBaseTest {
         }
 
         if (moveShards) {
-            Thread t = moveShards(numGroups, numShards);
-            t.start();
-            startedThreads.add(t);
+            startThread(moveShards(numGroups, numShards));
         }
 
         Thread.sleep(testLengthSecs * 1000);
@@ -281,7 +278,7 @@ public class ShardStorePart2Test extends ShardStoreBaseTest {
                 new Join(2, servers(2, numServersPerGroup)), new Leave(1))
                                       .results(new Ok(), new Ok(), new Ok())
                                       .build();
-        initSearchState.addClientWorker(cca, ccWorkload);
+        initSearchState.addClientWorker(CCA, ccWorkload);
 
         initSearchState.addClientWorker(client(1),
                 TransactionalKVStoreWorkload.builder().commands(
@@ -309,7 +306,8 @@ public class ShardStorePart2Test extends ShardStoreBaseTest {
                                             "foo-2", KEY_NOT_FOUND));
                 })).addInvariant(RESULTS_OK).addPrune(CLIENTS_DONE);
 
-        assertEndConditionValid(Search.dfs(initSearchState, searchSettings));
+        dfs(initSearchState);
+
     }
 
     @Test

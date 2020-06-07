@@ -1,7 +1,5 @@
 package framework.primarybackup;
 
-import framework.Address;
-import framework.testing.LocalAddress;
 import framework.testing.StateGenerator;
 import framework.testing.StateGenerator.StateGeneratorBuilder;
 import framework.testing.search.SearchState;
@@ -10,16 +8,15 @@ import framework.kvstore.KVStoreWorkload;
 import java.util.List;
 
 import static framework.primarybackup.PrimaryBackupTest.builder;
+import static framework.primarybackup.ViewServerTest.VSA;
 
 public class PBVizConfig extends VizConfig {
-    private static final Address vsa = new LocalAddress("viewserver");
-
     @Override
     public SearchState getInitialState(int numServers, int numClients,
                                        List<String> commands) {
         SearchState searchState =
                 super.getInitialState(numServers, numClients, commands);
-        searchState.addServer(vsa);
+        searchState.addServer(VSA);
         return searchState;
     }
 

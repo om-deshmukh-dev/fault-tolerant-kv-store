@@ -5,6 +5,7 @@ import framework.Message;
 import framework.testing.LocalAddress;
 import framework.testing.MessageEnvelope;
 import framework.testing.TimerEnvelope;
+import framework.testing.junit.FrameworkTestRunner;
 import framework.testing.junit.PrettyTestName;
 import framework.testing.junit.TestPointValue;
 import java.lang.reflect.Field;
@@ -13,6 +14,7 @@ import java.util.LinkedList;
 import org.junit.Before;
 import org.junit.FixMethodOrder;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 import org.junit.runners.MethodSorters;
 
 import static framework.testing.junit.BaseJUnitTest.server;
@@ -22,6 +24,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
+@RunWith(FrameworkTestRunner.class)
 public class ViewServerTest {
     static final Address VSA = new LocalAddress("viewserver"), TA =
             new LocalAddress("testserver");

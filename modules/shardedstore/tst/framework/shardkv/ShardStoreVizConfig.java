@@ -4,6 +4,7 @@ import framework.Address;
 import framework.testing.LocalAddress;
 import framework.testing.StateGenerator.StateGeneratorBuilder;
 import framework.testing.Workload;
+import framework.testing.junit.Lab;
 import framework.testing.search.SearchState;
 import framework.testing.visualization.VizConfig;
 import framework.kvstore.TransactionalKVStoreWorkload;
@@ -20,6 +21,7 @@ import static framework.shardkv.ShardStoreBaseTest.CCA;
 import static framework.shardkv.ShardStoreBaseTest.addServers;
 import static framework.shardkv.ShardStoreBaseTest.servers;
 
+@Lab("4")
 public class ShardStoreVizConfig extends VizConfig {
 
     private ShardMasterCommand parse(String command, int numServersPerGroup) {

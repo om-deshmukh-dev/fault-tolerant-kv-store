@@ -4,6 +4,7 @@ import framework.Address;
 import framework.testing.StateGenerator;
 import framework.testing.StateGenerator.StateGeneratorBuilder;
 import framework.testing.Workload;
+import framework.testing.junit.Lab;
 import framework.testing.search.SearchState;
 import framework.testing.visualization.VizConfig;
 import framework.pingpong.PingApplication.Ping;
@@ -13,6 +14,7 @@ import java.util.stream.Collectors;
 import static framework.pingpong.PingTest.builder;
 import static framework.pingpong.PingTest.sa;
 
+@Lab("0")
 public class PingVizConfig extends VizConfig {
     @Override
     public SearchState getInitialState(int numServers, int numClients,

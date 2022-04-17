@@ -1,14 +1,15 @@
 package framework.kvstore;
 
+import framework.testing.junit.FrameworkJUnitTest;
 import framework.testing.junit.FrameworkTestRunner;
-import framework.testing.junit.PrettyTestName;
+import framework.testing.junit.Lab;
+import framework.testing.junit.Part;
+import framework.testing.junit.TestDescription;
 import framework.testing.junit.TestPointValue;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.Before;
-import org.junit.FixMethodOrder;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.junit.runners.MethodSorters;
 
 import static framework.kvstore.KVStoreWorkload.append;
 import static framework.kvstore.KVStoreWorkload.appendResult;
@@ -19,9 +20,10 @@ import static framework.kvstore.KVStoreWorkload.put;
 import static framework.kvstore.KVStoreWorkload.putOk;
 import static org.junit.Assert.assertEquals;
 
-@FixMethodOrder(MethodSorters.NAME_ASCENDING)
+@Lab("1")
+@Part(1)
 @RunWith(FrameworkTestRunner.class)
-public class KVStoreTest {
+public class KVStoreTest extends FrameworkJUnitTest {
     private KVStore kvStore;
 
     @Before
@@ -31,7 +33,7 @@ public class KVStoreTest {
 
     @Test(timeout = 5 * 1000)
     @TestPointValue(5)
-    @PrettyTestName("Basic key-value operations")
+    @TestDescription("Basic key-value operations")
     public void test01BasicKVTests() {
         assertEquals(keyNotFound(), kvStore.execute(get("FOO")));
         assertEquals(putOk(), kvStore.execute(put("FOO", "BAR")));

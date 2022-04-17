@@ -3,6 +3,7 @@ package framework.primarybackup;
 import framework.Address;
 import framework.testing.StateGenerator;
 import framework.testing.StateGenerator.StateGeneratorBuilder;
+import framework.testing.junit.Lab;
 import framework.testing.search.SearchState;
 import framework.testing.visualization.VizConfig;
 import framework.kvstore.KVStoreWorkload;
@@ -11,6 +12,7 @@ import java.util.List;
 import static framework.primarybackup.PrimaryBackupTest.builder;
 import static framework.primarybackup.ViewServerTest.VSA;
 
+@Lab("2")
 public class PBVizConfig extends VizConfig {
     @Override
     public SearchState getInitialState(int numServers, int numClients,

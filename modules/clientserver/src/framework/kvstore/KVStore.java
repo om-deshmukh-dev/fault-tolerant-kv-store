@@ -3,6 +3,7 @@ package framework.kvstore;
 import framework.Application;
 import framework.Command;
 import framework.Result;
+import java.util.HashMap;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.NonNull;
@@ -56,23 +57,29 @@ public class KVStore implements Application {
     @NonNull private final String value;
   }
 
-  // Your code here...
+  HashMap<String, String> kvstore = new HashMap<>();
 
   @Override
   public KVStoreResult execute(Command command) {
     if (command instanceof Get) {
       Get g = (Get) command;
-      // Your code here...
+      if (kvstore.containsKey(g.key())) {
+        return new GetResult(kvstore.get(g.key()));
+      }
+      return new KeyNotFound();
     }
 
     if (command instanceof Put) {
       Put p = (Put) command;
-      // Your code here...
+      kvstore.put(p.key(), p.value());
+      return new PutOk();
     }
 
     if (command instanceof Append) {
       Append a = (Append) command;
-      // Your code here...
+      String valAppended = kvstore.getOrDefault(a.key(), "") + a.value();
+      kvstore.put(a.key(), valAppended);
+      return new AppendResult(valAppended);
     }
 
     throw new IllegalArgumentException();

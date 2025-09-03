@@ -3,6 +3,7 @@ package framework.clientserver;
 import framework.Address;
 import framework.Application;
 import framework.Node;
+import framework.Result;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
@@ -14,15 +15,14 @@ import lombok.ToString;
 @ToString(callSuper = true)
 @EqualsAndHashCode(callSuper = true)
 class SimpleServer extends Node {
-  // Your code here...
+  private final Application application;
 
   /* -----------------------------------------------------------------------------------------------
    *  Construction and Initialization
    * ---------------------------------------------------------------------------------------------*/
   public SimpleServer(Address address, Application app) {
     super(address);
-
-    // Your code here...
+    this.application = app;
   }
 
   @Override
@@ -34,6 +34,10 @@ class SimpleServer extends Node {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void handleRequest(Request m, Address sender) {
-    // Your code here...
+    Result result = this.application.execute(m.command());
+
+    // match the sequence number in the message, so the client can
+    // ensure the response they receive is for the most recent ongoing request
+    send(new Reply(result, m.sequenceNum()), sender);
   }
 }

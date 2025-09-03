@@ -17,8 +17,8 @@ import lombok.ToString;
 @EqualsAndHashCode(callSuper = true)
 class SimpleClient extends Node implements Client {
   private final Address serverAddress;
-
-  // Your code here...
+  private int sequenceNum; // for determining if the reply matches the ongoing request
+  private Result result; // for notifying
 
   /* -----------------------------------------------------------------------------------------------
    *  Construction and Initialization
@@ -26,6 +26,7 @@ class SimpleClient extends Node implements Client {
   public SimpleClient(Address address, Address serverAddress) {
     super(address);
     this.serverAddress = serverAddress;
+    this.sequenceNum = 0;
   }
 
   @Override
@@ -38,32 +39,47 @@ class SimpleClient extends Node implements Client {
    * ---------------------------------------------------------------------------------------------*/
   @Override
   public synchronized void sendCommand(Command command) {
-    // Your code here...
+    Request request = new Request(command, this.sequenceNum);
+    this.result = null;
+
+    send(request, this.serverAddress);
+    set(new ClientTimer(request), ClientTimer.CLIENT_RETRY_MILLIS);
   }
 
   @Override
   public synchronized boolean hasResult() {
-    // Your code here...
-    return false;
+    return this.result != null;
   }
 
   @Override
   public synchronized Result getResult() throws InterruptedException {
-    // Your code here...
-    return null;
+    while (this.result == null) {
+      wait();
+    }
+    return this.result;
   }
 
   /* -----------------------------------------------------------------------------------------------
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private synchronized void handleReply(Reply m, Address sender) {
-    // Your code here...
+    // client will only accept messages where the sequence number matches
+    if (m.sequenceNum() == this.sequenceNum) {
+      this.result = m.result();
+      this.sequenceNum++; // the next request is uniquely identified by the larger sequence num
+      notify();
+    }
   }
 
   /* -----------------------------------------------------------------------------------------------
    *  Timer Handlers
    * ---------------------------------------------------------------------------------------------*/
   private synchronized void onClientTimer(ClientTimer t) {
-    // Your code here...
+    // timer is not stale if sequence number matches client's sequence number.
+    // client's current sequence number is an identifier for an ongoing request.
+    if (t.request().sequenceNum() == this.sequenceNum) {
+      send(t.request(), this.serverAddress);
+      set(t, ClientTimer.CLIENT_RETRY_MILLIS);
+    }
   }
 }

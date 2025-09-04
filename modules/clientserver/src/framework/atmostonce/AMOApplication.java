@@ -14,8 +14,7 @@ import lombok.ToString;
 @RequiredArgsConstructor
 public final class AMOApplication<T extends Application> implements Application {
   @Getter @NonNull private final T application;
-
-  // Your code here...
+  @Getter private int sequenceNum;
 
   @Override
   public AMOResult execute(Command command) {
@@ -25,8 +24,19 @@ public final class AMOApplication<T extends Application> implements Application 
 
     AMOCommand amoCommand = (AMOCommand) command;
 
-    // Your code here...
-    return null;
+    // client and server match. therefore client request
+    // cannot be stale, and server should execute it
+    if (amoCommand.sequenceNum() == this.sequenceNum) {
+      Result result = this.application.execute(amoCommand.command());
+      this.sequenceNum++;
+
+      // echo back client's sequence number so the client has assurance
+      // the server has executed their most recent command
+      return new AMOResult(true, result, amoCommand.sequenceNum());
+    }
+
+    // client request is stale (sequence numbers do not match).
+    return new AMOResult(false, null, this.sequenceNum);
   }
 
   public Result executeReadOnly(Command command) {

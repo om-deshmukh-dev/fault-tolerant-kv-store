@@ -1,5 +1,7 @@
 package framework.clientserver;
 
+import framework.atmostonce.AMOApplication;
+import framework.atmostonce.AMOResult;
 import framework.Address;
 import framework.Application;
 import framework.Node;
@@ -15,14 +17,14 @@ import lombok.ToString;
 @ToString(callSuper = true)
 @EqualsAndHashCode(callSuper = true)
 class SimpleServer extends Node {
-  private final Application application;
+  private final AMOApplication<Application> amoApplication;
 
   /* -----------------------------------------------------------------------------------------------
    *  Construction and Initialization
    * ---------------------------------------------------------------------------------------------*/
   public SimpleServer(Address address, Application app) {
     super(address);
-    this.application = app;
+    this.amoApplication = new AMOApplication<>(app);
   }
 
   @Override
@@ -34,10 +36,7 @@ class SimpleServer extends Node {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void handleRequest(Request m, Address sender) {
-    Result result = this.application.execute(m.command());
-
-    // match the sequence number in the message, so the client can
-    // ensure the response they receive is for the most recent ongoing request
-    send(new Reply(result, m.sequenceNum()), sender);
+    AMOResult result = this.amoApplication.execute(m.command());
+    send(new Reply(result), sender);
   }
 }

@@ -6,6 +6,7 @@ import framework.Address;
 import framework.Application;
 import framework.Node;
 import framework.Result;
+import java.util.HashMap;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
@@ -24,7 +25,7 @@ class SimpleServer extends Node {
    * ---------------------------------------------------------------------------------------------*/
   public SimpleServer(Address address, Application app) {
     super(address);
-    this.amoApplication = new AMOApplication<>(app);
+    this.amoApplication = new AMOApplication<>(app, new HashMap<>());
   }
 
   @Override

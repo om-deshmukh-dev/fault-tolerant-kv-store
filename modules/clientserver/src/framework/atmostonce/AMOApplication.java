@@ -3,6 +3,7 @@ package framework.atmostonce;
 import framework.Application;
 import framework.Command;
 import framework.Result;
+import java.util.HashMap;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.NonNull;
@@ -14,7 +15,7 @@ import lombok.ToString;
 @RequiredArgsConstructor
 public final class AMOApplication<T extends Application> implements Application {
   @Getter @NonNull private final T application;
-  @Getter private int sequenceNum;
+  @Getter @NonNull private HashMap<AMOCommand, AMOResult> alreadyExecuted;
 
   @Override
   public AMOResult execute(Command command) {
@@ -24,19 +25,13 @@ public final class AMOApplication<T extends Application> implements Application 
 
     AMOCommand amoCommand = (AMOCommand) command;
 
-    // client and server match. therefore client request
-    // cannot be stale, and server should execute it
-    if (amoCommand.sequenceNum() == this.sequenceNum) {
-      Result result = this.application.execute(amoCommand.command());
-      this.sequenceNum++;
-
-      // echo back client's sequence number so the client has assurance
-      // the server has executed their most recent command
-      return new AMOResult(true, result, amoCommand.sequenceNum());
+    if (this.alreadyExecuted.containsKey(amoCommand)) {
+      return this.alreadyExecuted.get(amoCommand);
     }
 
-    // client request is stale (sequence numbers do not match).
-    return new AMOResult(false, null, this.sequenceNum);
+    AMOResult amoResult = new AMOResult(this.application.execute(amoCommand.command()), amoCommand.sequenceNum());
+    alreadyExecuted.put(amoCommand, amoResult);
+    return amoResult;
   }
 
   public Result executeReadOnly(Command command) {

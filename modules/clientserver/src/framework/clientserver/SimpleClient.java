@@ -42,7 +42,7 @@ class SimpleClient extends Node implements Client {
    * ---------------------------------------------------------------------------------------------*/
   @Override
   public synchronized void sendCommand(Command command) {
-    this.request = new Request(new AMOCommand(command, this.sequenceNum));
+    this.request = new Request(new AMOCommand(command, this.address(), this.sequenceNum));
     this.result = null;
 
     send(this.request, this.serverAddress);
@@ -68,25 +68,10 @@ class SimpleClient extends Node implements Client {
   private synchronized void handleReply(Reply m, Address sender) {
     AMOResult amoResult = m.result();
 
-    if (amoResult.wasSuccessfullyExecuted() && amoResult.sequenceNum() == this.sequenceNum) {
-      // ongoing request was successfully executed, client can move on by incrementing
-      // sequence number (in effect to match amoApp's sequence number/"time").
+    if (amoResult.sequenceNum() == this.sequenceNum) {
       this.result = amoResult.result();
       this.sequenceNum++;
       notify();
-    }
-
-    if (!amoResult.wasSuccessfullyExecuted() && amoResult.sequenceNum() > this.sequenceNum) {
-      // "time" at the client is out of sync with server,
-      // update sequenceNum, send new request with new sequence number, and set new timer
-      Command command = this.request.command().command();
-      AMOCommand amoCommandUpdatedSeqNum = new AMOCommand(command, amoResult.sequenceNum());
-
-      this.request = new Request(amoCommandUpdatedSeqNum);
-      this.sequenceNum = amoResult.sequenceNum();
-
-      send(this.request, this.serverAddress);
-      set(new ClientTimer(this.request), ClientTimer.CLIENT_RETRY_MILLIS);
     }
   }
 

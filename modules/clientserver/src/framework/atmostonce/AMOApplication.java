@@ -4,7 +4,9 @@ import framework.Address;
 import framework.Application;
 import framework.Command;
 import framework.Result;
+import java.io.Serializable;
 import java.util.HashMap;
+import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.NonNull;
@@ -15,9 +17,15 @@ import lombok.ToString;
 @ToString
 @RequiredArgsConstructor
 public final class AMOApplication<T extends Application> implements Application {
+
+  @Data
+  public static final class AMOExecution implements Serializable {
+    @NonNull private final AMOCommand amoCommand;
+    @NonNull private final AMOResult amoResult;
+  }
+
   @Getter @NonNull private final T application;
-  @Getter @NonNull private HashMap<AMOCommand, AMOResult> executedCommands;
-  @Getter @NonNull private HashMap<Address, AMOCommand> clientLatestCommand;
+  @Getter @NonNull private HashMap<Address, AMOExecution> clientLatestExecutedCommand;
 
   @Override
   public AMOResult execute(Command command) {
@@ -26,27 +34,24 @@ public final class AMOApplication<T extends Application> implements Application 
     }
 
     AMOCommand amoCommand = (AMOCommand) command;
+    AMOExecution amoExecutionLatest;
 
-    if (this.executedCommands.containsKey(amoCommand)) {
-      return this.executedCommands.get(amoCommand);
-    }
+    if (this.clientLatestExecutedCommand.containsKey(amoCommand.address())) {
+      amoExecutionLatest = clientLatestExecutedCommand.get(amoCommand.address());
 
-    if (clientLatestCommand.containsKey(amoCommand.address())) {
-      // if the sequence number on the incoming command is smaller,
-      // then return garbage because the client will discard this result anyway
-      AMOCommand clientLatestAMOCommand = clientLatestCommand.get(amoCommand.address());
-      if (amoCommand.sequenceNum() <= clientLatestAMOCommand.sequenceNum()) {
-        return executedCommands.get(clientLatestAMOCommand);
+      // command is stale, and client only cares about latest ongoing request
+      // (at most one ongoing request at a time), so return latest one to client
+      if (amoCommand.sequenceNum() <= amoExecutionLatest.amoCommand().sequenceNum()) {
+        return amoExecutionLatest.amoResult();
       }
-
-      // sequence number in client request is larger, implying the
-      // client has sent more recent command; can garbage collect previous one
-      executedCommands.remove(clientLatestAMOCommand);
     }
 
-    AMOResult amoResult = new AMOResult(this.application.execute(amoCommand.command()), amoCommand.sequenceNum());
-    executedCommands.put(amoCommand, amoResult);
-    clientLatestCommand.put(amoCommand.address(), amoCommand);
+    // command has never been executed before, so execute it and store
+    // result as latest executed cmd for the client
+    Result resultCommand = this.application.execute(amoCommand.command());
+    AMOResult amoResult = new AMOResult(resultCommand, amoCommand.sequenceNum());
+
+    clientLatestExecutedCommand.put(amoCommand.address(), new AMOExecution(amoCommand, amoResult));
     return amoResult;
   }
 

@@ -20,8 +20,7 @@ import lombok.ToString;
 class SimpleClient extends Node implements Client {
   private final Address serverAddress;
   private int sequenceNum; // for determining if the reply matches the ongoing request
-  private Request request;
-  private Result result; // for notifying
+  private Result result; // for getResult()
 
   /* -----------------------------------------------------------------------------------------------
    *  Construction and Initialization
@@ -42,11 +41,11 @@ class SimpleClient extends Node implements Client {
    * ---------------------------------------------------------------------------------------------*/
   @Override
   public synchronized void sendCommand(Command command) {
-    this.request = new Request(new AMOCommand(command, this.address(), this.sequenceNum));
+    Request request = new Request(new AMOCommand(command, this.address(), this.sequenceNum));
     this.result = null;
 
-    send(this.request, this.serverAddress);
-    set(new ClientTimer(this.request), ClientTimer.CLIENT_RETRY_MILLIS);
+    send(request, this.serverAddress);
+    set(new ClientTimer(request), ClientTimer.CLIENT_RETRY_MILLIS);
   }
 
   @Override
@@ -70,6 +69,9 @@ class SimpleClient extends Node implements Client {
 
     if (amoResult.sequenceNum() == this.sequenceNum) {
       this.result = amoResult.result();
+
+      // client sets up unique sequence number for next request, so that old replies and
+      // timers can be discarded (as these old replies must contain a lower sequence num)
       this.sequenceNum++;
       notify();
     }
@@ -82,7 +84,7 @@ class SimpleClient extends Node implements Client {
     // timer is not stale if sequence number matches client's sequence number.
     // client's current sequence number is an identifier for an ongoing request.
     if (t.request().command().sequenceNum() == this.sequenceNum) {
-      send(t.request(), this.serverAddress);
+      send(t.request(), this.serverAddress); // message may have been dropped, resend
       set(t, ClientTimer.CLIENT_RETRY_MILLIS);
     }
   }

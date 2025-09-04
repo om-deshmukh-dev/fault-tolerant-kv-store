@@ -25,7 +25,7 @@ class SimpleServer extends Node {
    * ---------------------------------------------------------------------------------------------*/
   public SimpleServer(Address address, Application app) {
     super(address);
-    this.amoApplication = new AMOApplication<>(app, new HashMap<>());
+    this.amoApplication = new AMOApplication<>(app, new HashMap<>(), new HashMap<>());
   }
 
   @Override

@@ -12,6 +12,9 @@ import lombok.ToString;
 @EqualsAndHashCode(callSuper = true)
 class PBClient extends Node implements Client {
   private final Address viewServer;
+  private int sequenceNum; // for determining if the reply matches the ongoing request
+  private Result result; // for getResult()
+  private View view;
 
   // Your code here...
 
@@ -21,11 +24,15 @@ class PBClient extends Node implements Client {
   public PBClient(Address address, Address viewServer) {
     super(address);
     this.viewServer = viewServer;
+    this.result = null;
+    this.sequenceNum = 0;
+    this.view = new View(ViewServer.STARTUP_VIEWNUM, null, null);
   }
 
   @Override
   public synchronized void init() {
-    // Your code here...
+    // setup pulsating timer to get view
+    set(new ClientGetViewTimer(), ClientGetViewTimer.CLIENT_GET_VIEW_RETRY_MILLIS);
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -38,14 +45,15 @@ class PBClient extends Node implements Client {
 
   @Override
   public synchronized boolean hasResult() {
-    // Your code here...
-    return false;
+    return this.result != null;
   }
 
   @Override
   public synchronized Result getResult() throws InterruptedException {
-    // Your code here...
-    return null;
+    while (this.result == null) {
+      wait();
+    }
+    return this.result;
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -56,7 +64,12 @@ class PBClient extends Node implements Client {
   }
 
   private synchronized void handleViewReply(ViewReply m, Address sender) {
-    // Your code here...
+    assert sender.equals(this.viewServer);
+    if (m.view().viewNum() > this.view.viewNum()) {
+      System.out.println("handleViewReply: FINALLY!!!");
+      System.exit(543);
+      this.view = m.view();
+    }
   }
 
   // Your code here...
@@ -66,5 +79,10 @@ class PBClient extends Node implements Client {
    * ---------------------------------------------------------------------------------------------*/
   private synchronized void onClientTimer(ClientTimer t) {
     // Your code here...
+  }
+
+  private synchronized void onClientGetViewTimer(ClientGetViewTimer t) {
+    send(new GetView(), this.viewServer);
+    set(new ClientGetViewTimer(), ClientGetViewTimer.CLIENT_GET_VIEW_RETRY_MILLIS);
   }
 }

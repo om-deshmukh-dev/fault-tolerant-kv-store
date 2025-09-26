@@ -1,8 +1,10 @@
 package framework.primarybackup;
 
+import atmostonce.AMOApplication;
 import framework.Address;
 import framework.Application;
 import framework.Node;
+import java.util.HashMap;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
@@ -10,8 +12,9 @@ import lombok.ToString;
 @EqualsAndHashCode(callSuper = true)
 class PBServer extends Node {
   private final Address viewServer;
-
-  // Your code here...
+  private AMOApplication<Application> amoApplication;
+  private View view;
+  private boolean isTransferOngoing;
 
   /* -----------------------------------------------------------------------------------------------
    *  Construction and Initialization
@@ -19,13 +22,15 @@ class PBServer extends Node {
   PBServer(Address address, Address viewServer, Application app) {
     super(address);
     this.viewServer = viewServer;
-
-    // Your code here...
+    this.amoApplication = new AMOApplication<>(app, new HashMap<>());
+    this.view = new View(ViewServer.STARTUP_VIEWNUM, null, null);
+    this.isTransferOngoing = false;
   }
 
   @Override
   public void init() {
-    // Your code here...
+    // set up pulsating timer to ping VS
+    set(new PingTimer(), PingTimer.PING_MILLIS);
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -36,7 +41,8 @@ class PBServer extends Node {
   }
 
   private void handleViewReply(ViewReply m, Address sender) {
-    // Your code here...
+    System.out.println("View Reply!!! view num is " + m.view().viewNum());
+    System.exit(412);
   }
 
   // Your code here...
@@ -45,7 +51,8 @@ class PBServer extends Node {
    *  Timer Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void onPingTimer(PingTimer t) {
-    // Your code here...
+    send(new Ping(this.view.viewNum()), this.viewServer);
+    set(t, PingTimer.PING_MILLIS);
   }
 
   // Your code here...

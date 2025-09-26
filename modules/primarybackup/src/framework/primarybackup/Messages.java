@@ -3,6 +3,7 @@ package framework.primarybackup;
 import atmostonce.AMOApplication;
 import atmostonce.AMOCommand;
 import atmostonce.AMOResult;
+import framework.Address;
 import framework.Application;
 import framework.Message;
 import lombok.Data;
@@ -47,4 +48,15 @@ class StateTransfer implements Message {
 @Data
 class StateTransferAck implements Message {
   private final View view;
+}
+
+@Data
+class Forward implements Message {
+  private final Request request; // request to be executed
+  private final Address client; // technically already part of request, but more explicit
+}
+
+@Data
+class ForwardAck implements Message {
+  // TODO: implement
 }

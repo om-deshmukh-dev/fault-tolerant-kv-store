@@ -6,7 +6,6 @@ import framework.Address;
 import framework.Application;
 import framework.Node;
 import java.util.HashMap;
-import javax.swing.plaf.nimbus.State;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
@@ -38,32 +37,33 @@ class PBServer extends Node {
   /* -----------------------------------------------------------------------------------------------
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
-  private void handleRequest(Request m, Address sender) {
+  private void handleRequest(Request request, Address sender) {
     if (isTransferOngoing) {
       System.out.println("PBServer.handleRequest: transfer ongoing case");
       System.exit(5414);
     }
 
-    if (!iAmPrimary(m.view()) || !m.view().equals(this.view)) {
+    if (!iAmPrimary(request.view()) || !request.view().equals(this.view)) {
+      // TODO: for an optimization, can initiate state transfer here if the request view is higher
+      // TODO: and this server is the primary in the new view (don't have to wait for VS ViewReply)
       System.out.println("PBServer.handleRequest: not primary in request view. or views dont match");
       System.exit(5416);
     }
 
     // at this point, I (the server) am the primary and received a request with matching view,
     // and I have no ongoing state transfer. can then proceed with the operation
-    if (this.amoApplication.alreadyExecuted(m.command())) {
+    if (this.amoApplication.alreadyExecuted(request.command())) {
       System.out.println("PBServer.handleRequest: already executed command. send reply back");
       System.exit(5420);
     }
 
     if (this.view.backup() == null) {
-      AMOResult amoResult = this.amoApplication.execute(m.command());
+      AMOResult amoResult = this.amoApplication.execute(request.command());
       send(new Reply(amoResult, this.view), sender);
     } else {
-      System.out.println("PBServer.handleRequest: forward to backup case");
-      System.exit(6313);
+      // at this point, the backup in the request and the view match
+      send(new Forward(request, sender), this.view.backup());
     }
-
   }
 
   /**
@@ -122,7 +122,7 @@ class PBServer extends Node {
     if (stateTransferAck.view().viewNum() > this.view.viewNum()) {
       assert stateTransferAck.view().primary().equals(this.address());
       assert stateTransferAck.view().backup().equals(sender);
-      // This must hold if we do casework on why the state transfer happened:
+      // The below assertion must hold if we do casework on why the state transfer happened:
       //  1. primary installed new backup: then primary must have acknowledged current view for
       //                                   VS to move on, so primary must only be one behind
       //  2. backup promoted to primary, and non-null new backup: backup must have set their view
@@ -132,6 +132,20 @@ class PBServer extends Node {
 
       this.view = stateTransferAck.view();
       this.isTransferOngoing = false;
+    }
+  }
+
+  private void handleForward(Forward forward, Address sender) {
+    if (iAmBackup(forward.request().view()) && forward.request().view().equals(this.view)) {
+      assert sender.equals(this.view.primary());
+      assert this.view.backup().equals(this.address());
+
+      amoApplication.execute(forward.request().command());
+      System.out.println("PBServer.handleForward: bleh");
+      System.exit(1642);
+    }
+    else {
+      System.exit(7756);
     }
   }
 

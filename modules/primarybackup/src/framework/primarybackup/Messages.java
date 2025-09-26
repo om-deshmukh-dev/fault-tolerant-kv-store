@@ -1,7 +1,9 @@
 package framework.primarybackup;
 
+import atmostonce.AMOApplication;
 import atmostonce.AMOCommand;
 import atmostonce.AMOResult;
+import framework.Application;
 import framework.Message;
 import lombok.Data;
 
@@ -36,4 +38,13 @@ class Reply implements Message {
   private final View view;
 }
 
-// Your code here...
+@Data
+class StateTransfer implements Message {
+  private final AMOApplication<Application> amoApplication;
+  private final View view;
+}
+
+@Data
+class StateTransferAck implements Message {
+  private final View view;
+}

@@ -6,6 +6,7 @@ import framework.Address;
 import framework.Application;
 import framework.Node;
 import java.util.HashMap;
+import javax.swing.plaf.nimbus.State;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
@@ -74,8 +75,6 @@ class PBServer extends Node {
    */
   private void handleViewReply(ViewReply m, Address sender) {
     assert sender.equals(this.viewServer);
-
-    System.out.println("View Reply!!! view num is " + m.view().viewNum());
     View viewNew = m.view();
 
     if (isTransferOngoing) {
@@ -85,16 +84,56 @@ class PBServer extends Node {
 
     // only primary will perform action upon receipt of a new view from VS
     if (viewNew.viewNum() > this.view.viewNum() && iAmPrimary(viewNew)) {
+      assert this.view.viewNum() + 1 == viewNew.viewNum();
+
       if (viewNew.backup() != null) {
         initStateTransfer(viewNew);
       } else {
-        assert !iAmPrimary(this.view) || this.view.viewNum() + 1 == viewNew.viewNum();
         this.view = viewNew;
       }
     }
   }
 
-  // Your code here...
+  private void handleStateTransfer(StateTransfer stateTransfer, Address sender) {
+    if (!iAmBackup(stateTransfer.view())) {
+      System.out.println("PBServer.handleStateTransfer: not backup in new view");
+      return;
+    }
+    assert !isTransferOngoing;
+    assert sender.equals(stateTransfer.view().primary());
+
+    if (stateTransfer.view().viewNum() > this.view.viewNum()) {
+      // newer view: transfer application state, update view, and send ack
+      this.amoApplication = stateTransfer.amoApplication();
+      this.view = stateTransfer.view();
+      send(new StateTransferAck(this.view), sender);
+    }
+    else if (stateTransfer.view().viewNum() == this.view.viewNum()) {
+      // current view: transfer already applied, can send back ack immediately
+      send(new StateTransferAck(this.view), sender);
+    }
+    else {
+      // older view: don't care (TODO: think about this more)
+      System.out.println("PBServer.handleStateTransfer: state transfer contains old view");
+    }
+  }
+
+  private void handleStateTransferAck(StateTransferAck stateTransferAck, Address sender) {
+    if (stateTransferAck.view().viewNum() > this.view.viewNum()) {
+      assert stateTransferAck.view().primary().equals(this.address());
+      assert stateTransferAck.view().backup().equals(sender);
+      // This must hold if we do casework on why the state transfer happened:
+      //  1. primary installed new backup: then primary must have acknowledged current view for
+      //                                   VS to move on, so primary must only be one behind
+      //  2. backup promoted to primary, and non-null new backup: backup must have set their view
+      //                                                          to the one in the previous
+      //                                                          StateTransfer they got.
+      assert this.view.viewNum() + 1 == stateTransferAck.view().viewNum();
+
+      this.view = stateTransferAck.view();
+      this.isTransferOngoing = false;
+    }
+  }
 
   /* -----------------------------------------------------------------------------------------------
    *  Timer Handlers
@@ -104,7 +143,10 @@ class PBServer extends Node {
     set(t, PingTimer.PING_MILLIS);
   }
 
-  // Your code here...
+  private void onStateTransferTimer(StateTransferTimer t) {
+    System.out.println("PBServer.onStateTransferTimer: unimplemented");
+    System.exit(5753);
+  }
 
   /* -----------------------------------------------------------------------------------------------
    *  Utils
@@ -112,9 +154,14 @@ class PBServer extends Node {
 
   private void initStateTransfer(View viewNew) {
     assert iAmPrimary(viewNew) && viewNew.backup() != null;
+    assert viewNew.viewNum() > this.view.viewNum();
     assert !isTransferOngoing;
-    System.out.println("initStateTransfer: unimplemented");
-    System.exit(4414);
+
+    // state transfer contains NEW view (not the one at primary)
+    StateTransfer stateTransfer = new StateTransfer(this.amoApplication, viewNew);
+
+    send(stateTransfer, viewNew.backup());
+    // TODO: set(new StateTransferTimer(stateTransfer), StateTransferTimer.STATE_TRANSFER_RETRY_MILLIS);
     isTransferOngoing = true;
   }
 
@@ -128,5 +175,9 @@ class PBServer extends Node {
 
   private boolean iAmIdle(View view) {
     return !iAmPrimary(view) && !iAmBackup(view);
+  }
+
+  private void sendErrorBack(Address sender) {
+    // TODO: implement eventually
   }
 }

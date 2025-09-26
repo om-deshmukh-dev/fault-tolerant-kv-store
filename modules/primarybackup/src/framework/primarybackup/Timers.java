@@ -24,4 +24,8 @@ final class ClientGetViewTimer implements Timer {
   static final int CLIENT_GET_VIEW_RETRY_MILLIS = 100;
 }
 
-// Your code here...
+@Data
+final class StateTransferTimer implements Timer {
+  static final int STATE_TRANSFER_RETRY_MILLIS = 100;
+  private final StateTransfer stateTransfer;
+}

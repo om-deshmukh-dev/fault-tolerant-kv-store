@@ -1,5 +1,7 @@
 package framework.primarybackup;
 
+import atmostonce.AMOCommand;
+import atmostonce.AMOResult;
 import framework.Address;
 import framework.Client;
 import framework.Command;
@@ -32,6 +34,7 @@ class PBClient extends Node implements Client {
   @Override
   public synchronized void init() {
     // setup pulsating timer to get view
+    // TODO: remove this (unnecessary)
     set(new ClientGetViewTimer(), ClientGetViewTimer.CLIENT_GET_VIEW_RETRY_MILLIS);
   }
 
@@ -40,7 +43,13 @@ class PBClient extends Node implements Client {
    * ---------------------------------------------------------------------------------------------*/
   @Override
   public synchronized void sendCommand(Command command) {
-    // Your code here...
+    AMOCommand amoCommand = new AMOCommand(command, this.address(), this.sequenceNum);
+    Request request = new Request(amoCommand, this.view);
+    this.result = null;
+
+    sendRequestToPrimary(amoCommand);
+
+    set(new ClientTimer(request), ClientTimer.CLIENT_RETRY_MILLIS);
   }
 
   @Override
@@ -60,14 +69,18 @@ class PBClient extends Node implements Client {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private synchronized void handleReply(Reply m, Address sender) {
-    // Your code here...
+    AMOResult amoResult = m.result();
+
+    if (amoResult.sequenceNum() == this.sequenceNum) {
+      this.result = amoResult.result();
+      this.sequenceNum++;
+      notify();
+    }
   }
 
   private synchronized void handleViewReply(ViewReply m, Address sender) {
     assert sender.equals(this.viewServer);
     if (m.view().viewNum() > this.view.viewNum()) {
-      System.out.println("handleViewReply: FINALLY!!!");
-      System.exit(543);
       this.view = m.view();
     }
   }
@@ -78,11 +91,23 @@ class PBClient extends Node implements Client {
    *  Timer Handlers
    * ---------------------------------------------------------------------------------------------*/
   private synchronized void onClientTimer(ClientTimer t) {
-    // Your code here...
+    if (t.request().command().sequenceNum() == this.sequenceNum) {
+      sendRequestToPrimary(t.request().command());
+      set(t, ClientTimer.CLIENT_RETRY_MILLIS);
+    }
   }
 
   private synchronized void onClientGetViewTimer(ClientGetViewTimer t) {
     send(new GetView(), this.viewServer);
     set(new ClientGetViewTimer(), ClientGetViewTimer.CLIENT_GET_VIEW_RETRY_MILLIS);
+  }
+
+  /* -----------------------------------------------------------------------------------------------
+   *  Utils
+   * ---------------------------------------------------------------------------------------------*/
+  private void sendRequestToPrimary(AMOCommand command) {
+    if (this.view.primary() != null) {
+      send(new Request(command, this.view), this.view.primary());
+    }
   }
 }

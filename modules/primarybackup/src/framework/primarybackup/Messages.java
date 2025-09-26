@@ -1,5 +1,7 @@
 package framework.primarybackup;
 
+import atmostonce.AMOCommand;
+import atmostonce.AMOResult;
 import framework.Message;
 import lombok.Data;
 
@@ -24,12 +26,14 @@ class ViewReply implements Message {
  * ---------------------------------------------------------------------------------------------*/
 @Data
 class Request implements Message {
-  // Your code here...
+  private final AMOCommand command;
+  private final View view;
 }
 
 @Data
 class Reply implements Message {
-  // Your code here...
+  private final AMOResult result;
+  private final View view;
 }
 
 // Your code here...

@@ -15,13 +15,13 @@ final class PingTimer implements Timer {
 
 @Data
 final class ClientTimer implements Timer {
-  static final int CLIENT_RETRY_MILLIS = 25;
+  static final int CLIENT_RETRY_MILLIS = 40;
   private final Request request;
 }
 
 @Data
 final class ClientGetViewTimer implements Timer {
-  static final int CLIENT_GET_VIEW_RETRY_MILLIS = 100;
+  static final int CLIENT_GET_VIEW_RETRY_MILLIS = 40;
 }
 
 @Data

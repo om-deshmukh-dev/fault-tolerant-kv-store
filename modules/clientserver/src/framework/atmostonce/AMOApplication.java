@@ -68,7 +68,12 @@ public final class AMOApplication<T extends Application> implements Application 
   }
 
   public boolean alreadyExecuted(AMOCommand amoCommand) {
-    // Your code here...
-    return false;
+    assert amoCommand != null;
+    if (!this.clientLatestExecutedCommand.containsKey(amoCommand.address())) {
+      return false;
+    }
+    AMOExecution amoExecutionLatest = this.clientLatestExecutedCommand.get(amoCommand.address());
+
+    return amoCommand.sequenceNum() <= amoExecutionLatest.amoCommand().sequenceNum();
   }
 }

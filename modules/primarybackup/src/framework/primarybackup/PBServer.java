@@ -16,10 +16,7 @@ class PBServer extends Node {
   private AMOApplication<Application> amoApplication;
   private View view;
   private boolean isTransferOngoing;
-
-  // prevent multiple client requests from passing through at same time
-  private Request requestOngoing;
-  private boolean isRequestOngoing;
+  private Request requestForwardOngoing;
 
   /* -----------------------------------------------------------------------------------------------
    *  Construction and Initialization
@@ -29,9 +26,7 @@ class PBServer extends Node {
     this.viewServer = viewServer;
     this.amoApplication = new AMOApplication<>(app, new HashMap<>());
     this.view = new View(ViewServer.STARTUP_VIEWNUM, null, null);
-
-    this.requestOngoing = null;
-    this.isTransferOngoing = false;
+    this.requestForwardOngoing = null;
   }
 
   @Override
@@ -44,34 +39,28 @@ class PBServer extends Node {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void handleRequest(Request request, Address sender) {
-    if (isTransferOngoing || isRequestOngoing) {
-      // System.out.println("PBServer.handleRequest: transfer ongoing case");
-      return;
+    if (isTransferOngoing) {
+      assert this.requestForwardOngoing == null; return;
     }
-
-    if (!iAmPrimary(request.view()) || !request.view().equals(this.view)) {
+    if (!request.view().equals(this.view) || !iAmPrimary(request.view())) {
       // TODO: for an optimization, can initiate state transfer here if the request view is higher
       // TODO: and this server is the primary in the new view (don't have to wait for VS ViewReply)
-      // System.out.println("PBServer.handleRequest: not primary in request view. or views dont match " + request.view() + " this view " + this.view + " this address " + this.address());
+      return;
+    }
+    // block if I (as the primary) am forwarding a different request
+    if (isRequestForwardOngoing() && !this.requestForwardOngoing.equals(request)) {
       return;
     }
 
-    // at this point, I (the server) am the primary and received a request with matching view,
-    // and I have no ongoing state transfer. can then proceed with the operation
-    if (this.amoApplication.alreadyExecuted(request.command())) {
-      // System.out.println("PBServer.handleRequest: already executed command. send reply back");
-      AMOResult amoResult = this.amoApplication.execute(request.command());
-      send(new Reply(amoResult, this.view), sender);
-    }
-
-    if (this.view.backup() == null) {
+    // At this point, I am primary, views match, no state transfer, and no other client request.
+    // Then I must process the request:
+    if (canProcessWithoutForwarding(request)) {
+      assert !isRequestForwardOngoing();
       AMOResult amoResult = this.amoApplication.execute(request.command());
       send(new Reply(amoResult, this.view), sender);
     } else {
-      // at this point, the backup in the request and the view match
       send(new Forward(request, sender), this.view.backup());
-      isRequestOngoing = true;
-      requestOngoing = request;
+      this.requestForwardOngoing = request;
     }
   }
 
@@ -87,13 +76,13 @@ class PBServer extends Node {
     View viewNew = m.view();
 
     if (isTransferOngoing) {
-      // System.out.println("handleViewReply: handle state transfer ongoing case");
       return;
     }
 
     // only primary will perform action upon receipt of a new view from VS
     if (viewNew.viewNum() > this.view.viewNum() && iAmPrimary(viewNew)) {
       assert this.view.viewNum() + 1 == viewNew.viewNum();
+      this.requestForwardOngoing = null; // don't care about ForwardAck from old backup
 
       if (viewNew.backup() != null) {
         initStateTransfer(viewNew);
@@ -104,26 +93,23 @@ class PBServer extends Node {
   }
 
   private void handleStateTransfer(StateTransfer stateTransfer, Address sender) {
-    if (!iAmBackup(stateTransfer.view())) {
-      // System.out.println("PBServer.handleStateTransfer: not backup in new view");
+    // could be that backup can be promoted to primary, and get duplicated state transfer
+    if (!iAmBackup(stateTransfer.view()) || isTransferOngoing) {
       return;
     }
-    // assert !isTransferOngoing; // wrong assertion: backup can be promoted to primary, and get duplicated state transfer
     assert sender.equals(stateTransfer.view().primary());
 
     if (stateTransfer.view().viewNum() > this.view.viewNum()) {
       // newer view: transfer application state, update view, and send ack
       this.amoApplication = stateTransfer.amoApplication();
       this.view = stateTransfer.view();
+      this.requestForwardOngoing = null; // to be safe
       send(new StateTransferAck(this.view), sender);
     }
     else if (stateTransfer.view().viewNum() == this.view.viewNum()) {
       // current view: transfer already applied, can send back ack immediately
+      assert this.requestForwardOngoing == null;
       send(new StateTransferAck(this.view), sender);
-    }
-    else {
-      // older view: don't care (TODO: think about this more)
-      // System.out.println("PBServer.handleStateTransfer: state transfer contains old view");
     }
   }
 
@@ -131,6 +117,8 @@ class PBServer extends Node {
     if (stateTransferAck.view().viewNum() > this.view.viewNum()) {
       assert stateTransferAck.view().primary().equals(this.address());
       assert stateTransferAck.view().backup().equals(sender);
+      assert !isRequestForwardOngoing();
+      assert isTransferOngoing;
       // The below assertion must hold if we do casework on why the state transfer happened:
       //  1. primary installed new backup: then primary must have acknowledged current view for
       //                                   VS to move on, so primary must only be one behind
@@ -145,6 +133,7 @@ class PBServer extends Node {
   }
 
   private void handleForward(Forward forward, Address sender) {
+    // EXTREMELY IMPORTANT: otherwise may execute forward that is not included in state transfer
     if (isTransferOngoing) {
       return;
     }
@@ -152,28 +141,24 @@ class PBServer extends Node {
     if (iAmBackup(forward.request().view()) && forward.request().view().equals(this.view)) {
       assert sender.equals(this.view.primary());
       assert this.view.backup().equals(this.address());
+      assert !isRequestForwardOngoing();
 
       amoApplication.execute(forward.request().command());
       send(new ForwardAck(forward.request(), forward.client()), sender);
     }
-    else {
-      // System.out.println("PBServer.handleForward: i am not backup or views dont match");
-    }
   }
 
   private void handleForwardAck(ForwardAck forwardAck, Address sender) {
-    if (isTransferOngoing || !isRequestOngoing) {
-      // System.out.println("PBServer.handleForwardAck: transfer ongoing (blocked)");
+    if (isTransferOngoing || !isRequestForwardOngoing()) {
       return;
     }
 
-    if (forwardAck.request().view().equals(this.view) && forwardAck.request().equals(requestOngoing)) {
+    if (forwardAck.request().view().equals(this.view) && forwardAck.request().equals(this.requestForwardOngoing)) {
       assert iAmPrimary(this.view);
 
       AMOResult result = amoApplication.execute(forwardAck.request().command());
       send(new Reply(result, this.view), forwardAck.client());
-      isRequestOngoing = false;
-      requestOngoing = null;
+      this.requestForwardOngoing = null;
     }
   }
 
@@ -189,6 +174,7 @@ class PBServer extends Node {
   private void onStateTransferTimer(StateTransferTimer t) {
     if (t.stateTransfer().view().viewNum() > this.view.viewNum()) {
       assert isTransferOngoing;
+      assert !isRequestForwardOngoing();
       assert t.stateTransfer().view().primary().equals(this.address());
       send(t.stateTransfer(), t.stateTransfer().view().backup());
       set(t, StateTransferTimer.STATE_TRANSFER_RETRY_MILLIS);
@@ -203,6 +189,7 @@ class PBServer extends Node {
     assert iAmPrimary(viewNew) && viewNew.backup() != null;
     assert viewNew.viewNum() > this.view.viewNum();
     assert !isTransferOngoing;
+    assert requestForwardOngoing == null;
 
     // state transfer contains NEW view (not the one at primary)
     StateTransfer stateTransfer = new StateTransfer(this.amoApplication, viewNew);
@@ -210,10 +197,6 @@ class PBServer extends Node {
     send(stateTransfer, viewNew.backup());
     set(new StateTransferTimer(stateTransfer), StateTransferTimer.STATE_TRANSFER_RETRY_MILLIS);
     isTransferOngoing = true;
-
-    // any ongoing request is nullified
-    isRequestOngoing = false;
-    requestOngoing = null;
   }
 
   private boolean iAmPrimary(View view) {
@@ -226,6 +209,14 @@ class PBServer extends Node {
 
   private boolean iAmIdle(View view) {
     return !iAmPrimary(view) && !iAmBackup(view);
+  }
+
+  private boolean isRequestForwardOngoing() {
+    return requestForwardOngoing != null;
+  }
+
+  private boolean canProcessWithoutForwarding(Request request) {
+    return this.amoApplication.alreadyExecuted(request.command()) || this.view.backup() == null;
   }
 
   private void sendErrorBack(Address sender) {

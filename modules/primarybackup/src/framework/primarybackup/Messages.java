@@ -1,8 +1,8 @@
 package framework.primarybackup;
 
-import atmostonce.AMOApplication;
-import atmostonce.AMOCommand;
-import atmostonce.AMOResult;
+import framework.atmostonce.AMOApplication;
+import framework.atmostonce.AMOCommand;
+import framework.atmostonce.AMOResult;
 import framework.Address;
 import framework.Application;
 import framework.Message;

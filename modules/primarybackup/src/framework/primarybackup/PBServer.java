@@ -17,6 +17,10 @@ class PBServer extends Node {
   private View view;
   private boolean isTransferOngoing;
 
+  // prevent multiple client requests from passing through at same time
+  private Request requestOngoing;
+  private boolean isRequestOngoing;
+
   /* -----------------------------------------------------------------------------------------------
    *  Construction and Initialization
    * ---------------------------------------------------------------------------------------------*/
@@ -25,6 +29,8 @@ class PBServer extends Node {
     this.viewServer = viewServer;
     this.amoApplication = new AMOApplication<>(app, new HashMap<>());
     this.view = new View(ViewServer.STARTUP_VIEWNUM, null, null);
+
+    this.requestOngoing = null;
     this.isTransferOngoing = false;
   }
 
@@ -38,7 +44,7 @@ class PBServer extends Node {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void handleRequest(Request request, Address sender) {
-    if (isTransferOngoing) {
+    if (isTransferOngoing || isRequestOngoing) {
       // System.out.println("PBServer.handleRequest: transfer ongoing case");
       return;
     }
@@ -64,6 +70,8 @@ class PBServer extends Node {
     } else {
       // at this point, the backup in the request and the view match
       send(new Forward(request, sender), this.view.backup());
+      isRequestOngoing = true;
+      requestOngoing = request;
     }
   }
 
@@ -100,7 +108,7 @@ class PBServer extends Node {
       // System.out.println("PBServer.handleStateTransfer: not backup in new view");
       return;
     }
-    assert !isTransferOngoing;
+    // assert !isTransferOngoing; // wrong assertion: backup can be promoted to primary, and get duplicated state transfer
     assert sender.equals(stateTransfer.view().primary());
 
     if (stateTransfer.view().viewNum() > this.view.viewNum()) {
@@ -137,10 +145,13 @@ class PBServer extends Node {
   }
 
   private void handleForward(Forward forward, Address sender) {
+    if (isTransferOngoing) {
+      return;
+    }
+
     if (iAmBackup(forward.request().view()) && forward.request().view().equals(this.view)) {
       assert sender.equals(this.view.primary());
       assert this.view.backup().equals(this.address());
-      assert !isTransferOngoing;
 
       amoApplication.execute(forward.request().command());
       send(new ForwardAck(forward.request(), forward.client()), sender);
@@ -151,17 +162,18 @@ class PBServer extends Node {
   }
 
   private void handleForwardAck(ForwardAck forwardAck, Address sender) {
-    if (isTransferOngoing) {
+    if (isTransferOngoing || !isRequestOngoing) {
       // System.out.println("PBServer.handleForwardAck: transfer ongoing (blocked)");
       return;
     }
 
-    if (forwardAck.request().view().equals(this.view)) {
+    if (forwardAck.request().view().equals(this.view) && forwardAck.request().equals(requestOngoing)) {
       assert iAmPrimary(this.view);
-      assert !amoApplication.alreadyExecuted(forwardAck.request().command());
 
       AMOResult result = amoApplication.execute(forwardAck.request().command());
       send(new Reply(result, this.view), forwardAck.client());
+      isRequestOngoing = false;
+      requestOngoing = null;
     }
   }
 
@@ -198,6 +210,10 @@ class PBServer extends Node {
     send(stateTransfer, viewNew.backup());
     set(new StateTransferTimer(stateTransfer), StateTransferTimer.STATE_TRANSFER_RETRY_MILLIS);
     isTransferOngoing = true;
+
+    // any ongoing request is nullified
+    isRequestOngoing = false;
+    requestOngoing = null;
   }
 
   private boolean iAmPrimary(View view) {

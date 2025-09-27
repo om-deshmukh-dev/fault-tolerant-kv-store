@@ -71,6 +71,9 @@ class PBClient extends Node implements Client {
   private synchronized void handleReply(Reply m, Address sender) {
     AMOResult amoResult = m.result();
 
+    // client does not care if their view number is larger than the one in the ongoing request.
+    // client can be assured that if both primary and backup in older view processed request, then
+    // the effect of their request remains in all newer views
     if (amoResult.sequenceNum() == this.sequenceNum) {
       this.result = amoResult.result();
       this.sequenceNum++;
@@ -84,8 +87,6 @@ class PBClient extends Node implements Client {
       this.view = m.view();
     }
   }
-
-  // Your code here...
 
   /* -----------------------------------------------------------------------------------------------
    *  Timer Handlers

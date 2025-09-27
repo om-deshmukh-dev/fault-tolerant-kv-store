@@ -58,5 +58,6 @@ class Forward implements Message {
 
 @Data
 class ForwardAck implements Message {
-  // TODO: implement
+  private final Request request;
+  private final Address client;
 }

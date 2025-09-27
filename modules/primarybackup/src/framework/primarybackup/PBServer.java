@@ -39,22 +39,23 @@ class PBServer extends Node {
    * ---------------------------------------------------------------------------------------------*/
   private void handleRequest(Request request, Address sender) {
     if (isTransferOngoing) {
-      System.out.println("PBServer.handleRequest: transfer ongoing case");
-      System.exit(5414);
+      // System.out.println("PBServer.handleRequest: transfer ongoing case");
+      return;
     }
 
     if (!iAmPrimary(request.view()) || !request.view().equals(this.view)) {
       // TODO: for an optimization, can initiate state transfer here if the request view is higher
       // TODO: and this server is the primary in the new view (don't have to wait for VS ViewReply)
-      System.out.println("PBServer.handleRequest: not primary in request view. or views dont match");
-      System.exit(5416);
+      // System.out.println("PBServer.handleRequest: not primary in request view. or views dont match " + request.view() + " this view " + this.view + " this address " + this.address());
+      return;
     }
 
     // at this point, I (the server) am the primary and received a request with matching view,
     // and I have no ongoing state transfer. can then proceed with the operation
     if (this.amoApplication.alreadyExecuted(request.command())) {
-      System.out.println("PBServer.handleRequest: already executed command. send reply back");
-      System.exit(5420);
+      // System.out.println("PBServer.handleRequest: already executed command. send reply back");
+      AMOResult amoResult = this.amoApplication.execute(request.command());
+      send(new Reply(amoResult, this.view), sender);
     }
 
     if (this.view.backup() == null) {
@@ -78,8 +79,8 @@ class PBServer extends Node {
     View viewNew = m.view();
 
     if (isTransferOngoing) {
-      System.out.println("handleViewReply: handle state transfer ongoing case");
-      System.exit(2152);
+      // System.out.println("handleViewReply: handle state transfer ongoing case");
+      return;
     }
 
     // only primary will perform action upon receipt of a new view from VS
@@ -96,7 +97,7 @@ class PBServer extends Node {
 
   private void handleStateTransfer(StateTransfer stateTransfer, Address sender) {
     if (!iAmBackup(stateTransfer.view())) {
-      System.out.println("PBServer.handleStateTransfer: not backup in new view");
+      // System.out.println("PBServer.handleStateTransfer: not backup in new view");
       return;
     }
     assert !isTransferOngoing;
@@ -114,7 +115,7 @@ class PBServer extends Node {
     }
     else {
       // older view: don't care (TODO: think about this more)
-      System.out.println("PBServer.handleStateTransfer: state transfer contains old view");
+      // System.out.println("PBServer.handleStateTransfer: state transfer contains old view");
     }
   }
 
@@ -139,15 +140,31 @@ class PBServer extends Node {
     if (iAmBackup(forward.request().view()) && forward.request().view().equals(this.view)) {
       assert sender.equals(this.view.primary());
       assert this.view.backup().equals(this.address());
+      assert !isTransferOngoing;
 
       amoApplication.execute(forward.request().command());
-      System.out.println("PBServer.handleForward: bleh");
-      System.exit(1642);
+      send(new ForwardAck(forward.request(), forward.client()), sender);
     }
     else {
-      System.exit(7756);
+      // System.out.println("PBServer.handleForward: i am not backup or views dont match");
     }
   }
+
+  private void handleForwardAck(ForwardAck forwardAck, Address sender) {
+    if (isTransferOngoing) {
+      // System.out.println("PBServer.handleForwardAck: transfer ongoing (blocked)");
+      return;
+    }
+
+    if (forwardAck.request().view().equals(this.view)) {
+      assert iAmPrimary(this.view);
+      assert !amoApplication.alreadyExecuted(forwardAck.request().command());
+
+      AMOResult result = amoApplication.execute(forwardAck.request().command());
+      send(new Reply(result, this.view), forwardAck.client());
+    }
+  }
+
 
   /* -----------------------------------------------------------------------------------------------
    *  Timer Handlers
@@ -158,8 +175,12 @@ class PBServer extends Node {
   }
 
   private void onStateTransferTimer(StateTransferTimer t) {
-    System.out.println("PBServer.onStateTransferTimer: unimplemented");
-    System.exit(5753);
+    if (t.stateTransfer().view().viewNum() > this.view.viewNum()) {
+      assert isTransferOngoing;
+      assert t.stateTransfer().view().primary().equals(this.address());
+      send(t.stateTransfer(), t.stateTransfer().view().backup());
+      set(t, StateTransferTimer.STATE_TRANSFER_RETRY_MILLIS);
+    }
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -175,7 +196,7 @@ class PBServer extends Node {
     StateTransfer stateTransfer = new StateTransfer(this.amoApplication, viewNew);
 
     send(stateTransfer, viewNew.backup());
-    // TODO: set(new StateTransferTimer(stateTransfer), StateTransferTimer.STATE_TRANSFER_RETRY_MILLIS);
+    set(new StateTransferTimer(stateTransfer), StateTransferTimer.STATE_TRANSFER_RETRY_MILLIS);
     isTransferOngoing = true;
   }
 

@@ -1,9 +1,16 @@
 package framework.paxos;
 
+import framework.atmostonce.AMOApplication;
+import framework.atmostonce.AMOCommand;
 import framework.Address;
 import framework.Application;
 import framework.Command;
+import framework.Message;
 import framework.Node;
+import java.io.Serializable;
+import java.util.HashMap;
+import java.util.HashSet;
+import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
 
@@ -12,8 +19,60 @@ import lombok.ToString;
 public class PaxosServer extends Node {
   /** All servers in the Paxos group, including this one. */
   private final Address[] servers;
+  private final AMOApplication<Application> amoApplication;
 
-  // Your code here...
+  private static final int LOG_START = 1;
+
+  @Data
+  public static class Ballot implements Comparable<Ballot>, Serializable {
+    private int sequenceNum;
+    private Address address;
+
+    public Ballot(int sequenceNum, Address address) {
+      this.sequenceNum = sequenceNum;
+      this.address = address;
+    }
+    @Override
+    public int compareTo(Ballot ballotCmpTo) {
+      if (this.sequenceNum != ballotCmpTo.sequenceNum()) { return this.sequenceNum - ballotCmpTo.sequenceNum(); }
+      return this.address.compareTo(ballotCmpTo.address());
+    }
+  }
+
+  @Data
+  private static class LogEntry implements Serializable {
+    private AMOCommand amoCommand;
+    private Ballot ballot;
+    private PaxosLogSlotStatus status;
+
+    public LogEntry(AMOCommand amoCommand, Ballot ballot, PaxosLogSlotStatus status) {
+      this.amoCommand = amoCommand;
+      this.ballot = ballot;
+      this.status = status;
+    }
+  }
+
+  /** Common Data Structures Used By Most Roles: */
+
+  // isLeaderElected and ballotHighestSeen together define who this server thinks the current leader is
+  private boolean isLeaderElected;
+  private Ballot ballotHighestSeen;
+
+  // Used to bribe acceptors (P1) so that proposed values (P2) respect the write-once register
+  // abstraction once a value is chosen. The ballots are totally ordered among all servers.
+  private Ballot ballotSelf;
+
+  // Combines replica and acceptor state on each log slot.
+  //  - Replica State: Track which slots have been proposed (“accepted”), chosen, and empty.
+  //                   This enables the replica to know how to handle client requests or decision messages.
+  //  - Acceptor State: Track the value accepted for each slot with the highest ballot number.
+  //                    This enables the acceptor (in conjunction with the replicas) to achieve
+  //                    invariant A4/5 (once majority accepts, can’t overwrite).
+  private final HashMap<Integer, LogEntry> logValues;
+
+  // Leader (acting as commander) uses this to wait for a majority of acceptors to accept a
+  // value for a slot (P2a sent, P2b received)
+  private HashMap<Integer, HashSet<Address>> commanderWaitForPerSlot;
 
   /* -----------------------------------------------------------------------------------------------
    *  Construction and Initialization
@@ -22,12 +81,161 @@ public class PaxosServer extends Node {
     super(address);
     this.servers = servers;
 
-    // Your code here...
+    this.amoApplication = new AMOApplication<>(app, new HashMap<>());
+
+    /**
+     * constructing PAXOS data structures:
+     */
+    this.ballotSelf = new Ballot(0, address);
+
+    // every server initially thinks they are the leader
+    this.isLeaderElected = true; // TODO: change to false (but for now skip leader election process)
+    this.ballotHighestSeen = new Ballot(0, address);
+
+    this.logValues = new HashMap<>();
+    this.commanderWaitForPerSlot = new HashMap<>();
   }
 
   @Override
   public void init() {
     // Your code here...
+  }
+
+  /* -----------------------------------------------------------------------------------------------
+   *  Message Handlers
+   * ---------------------------------------------------------------------------------------------*/
+  private void handlePaxosRequest(PaxosRequest m, Address sender) {
+    assertWithMessage(!amoApplication.alreadyExecuted(m.command()), "PaxosServer.handlePaxosRequest: Command already executed");
+    assertWithMessage(isLeader(), "PaxosServer.handlePaxosRequest: Not the leader");
+    assertWithMessage(getReqLogStatus(m) == PaxosLogSlotStatus.EMPTY, "PaxosServer.handlePaxosRequest: Request non-empty status");
+
+    // leader will put command into first empty slot, and send P2a message to all
+    int emptySlotNum = findFirstEmptySlot();
+    logValues.put(emptySlotNum, new LogEntry(m.command(), this.ballotSelf, PaxosLogSlotStatus.ACCEPTED));
+
+    resetCommanderWaitFor(emptySlotNum);
+    sendAllExceptSelf(new P2a(this.ballotSelf, emptySlotNum, m.command()));
+  }
+
+  /* -----------------------------------------------------------------------------------------------
+   *  Message Handlers - Acceptors
+   * ---------------------------------------------------------------------------------------------*/
+
+  private void handleP2a(P2a p2a, Address sender) {
+    assertWithMessage(p2a.ballot().compareTo(this.ballotSelf) != 0,
+                      "PaxosServer.handleP2a: server should never get their own P2a msg (for now)");
+
+    // ignore P2a if the ballot in the request is lower than our highest seen (bribed by someone else)
+    if (p2a.ballot().compareTo(this.ballotHighestSeen) < 0) { return; }
+
+    // adopt ballot if higher than currently highest seen (may change leader at this point)
+    if (p2a.ballot().compareTo(this.ballotHighestSeen) > 0) { changeBallotOnPreemption(p2a.ballot()); }
+
+    // at this point, the ballot in the P2a request must match our highest seen
+    assertWithMessage(this.ballotHighestSeen.equals(p2a.ballot()),
+                  "PaxosServer.handleP2a: highest ballot is " + this.ballotHighestSeen + " instead of " + p2a.ballot());
+
+    // case on the logEntry status of the slot number in our log
+    switch (status(p2a.slotNum())) {
+      case EMPTY:
+        logValues.put(p2a.slotNum(), new LogEntry(p2a.command(), p2a.ballot(), PaxosLogSlotStatus.ACCEPTED));
+        break;
+      case ACCEPTED:
+        assertWithMessage(this.ballotHighestSeen.compareTo(logValues.get(p2a.slotNum()).ballot()) >= 0,
+                          "PaxosServer.handleP2a: highest ballot is not at least as large as the ballot in any non-empty slot");
+        logValues.put(p2a.slotNum(), new LogEntry(p2a.command(), p2a.ballot(), PaxosLogSlotStatus.ACCEPTED));
+        break;
+      case CHOSEN:
+        assertWithMessage(p2a.command().equals(logValues.get(p2a.slotNum()).amoCommand()),
+                      "PaxosServer.handleP2a: Cmd from request is the same as cmd in slot");
+        // do not need to do anything really
+        break;
+      case CLEARED:
+        assertWithMessage(false, "PaxosServer.handleP2a: cleared case unimplemented");
+        break;
+    }
+
+    assertWithMessage(false, "YAY");
+  }
+
+  /* -----------------------------------------------------------------------------------------------
+   *  Timer Handlers
+   * ---------------------------------------------------------------------------------------------*/
+  // Your code here...
+
+  /* -----------------------------------------------------------------------------------------------
+   *  Utils
+   * ---------------------------------------------------------------------------------------------*/
+
+  // log helpers:
+
+  private int findFirstEmptySlot() {
+    // TODO: add in garbage collection logic
+
+    int logSlotNum = LOG_START;
+    while (logValues.containsKey(logSlotNum)) {
+      logSlotNum++;
+    }
+    return logSlotNum;
+  }
+
+  private PaxosLogSlotStatus getReqLogStatus(PaxosRequest request) {
+    // TODO: handle returning CLEARED status
+    for (LogEntry entry : logValues.values()) {
+      if (entry.amoCommand().equals(request.command())) {
+        assertWithMessage(entry.status == PaxosLogSlotStatus.ACCEPTED || entry.status == PaxosLogSlotStatus.CHOSEN,
+                            "PaxosServer.getReqLogStatus: request in log has malformed status " + entry.status);
+        return entry.status;
+      }
+    }
+    return PaxosLogSlotStatus.EMPTY;
+  }
+
+  // leader and ballot stuff:
+
+  // the leader is defined by the server in the highest ballot seen
+  private boolean isLeader() {
+    return this.isLeaderElected && this.ballotHighestSeen.address.equals(this.address());
+  }
+
+  private void changeBallotOnPreemption(Ballot ballot) {
+    assertWithMessage(ballot.compareTo(this.ballotHighestSeen) > 0,
+                      "PaxosServer.changeBallotOnPreemption: ballot passed in not higher than ours");
+
+    this.ballotHighestSeen = ballot;
+    this.isLeaderElected = true;
+    // TODO: add heartbeat boolean change according to design
+  }
+
+  // CommanderWaitForPerSlotHelper:
+
+  // reset CommanderWaitFor for a slot to the FullSet \ { self }
+  private void resetCommanderWaitFor(int slotNum) {
+    this.commanderWaitForPerSlot.put(slotNum, new HashSet<>());
+    for (Address server : servers) {
+      if (!server.equals(this.address())) {
+        this.commanderWaitForPerSlot.get(slotNum).add(server);
+      }
+    }
+  }
+
+  // message helpers:
+
+  private void sendAllExceptSelf(Message m) {
+    for (Address server : servers) {
+      if (!server.equals(this.address())) {
+        send(m, server);
+      }
+    }
+  }
+
+  // basic helpers:
+
+  private void assertWithMessage(boolean b, String m) {
+    if (!b) {
+      System.out.println(m);
+      System.exit(1);
+    }
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -52,9 +260,14 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public PaxosLogSlotStatus status(int logSlotNum) {
-    // assertWithMessage(false, "PaxosServer.status: Unimplemented");
-    // TODO: implement this for test 2
-    return null;
+    // TODO: eventually handle garbage-collection
+    if (this.logValues.containsKey(logSlotNum)) {
+      PaxosLogSlotStatus slotStatus = logValues.get(logSlotNum).status();
+      assertWithMessage(slotStatus == PaxosLogSlotStatus.ACCEPTED || slotStatus == PaxosLogSlotStatus.CHOSEN,
+                                      "PaxosServer.chosen: slot " + logSlotNum + " has status " + slotStatus);
+      return slotStatus;
+    }
+    return PaxosLogSlotStatus.EMPTY;
   }
 
   /**
@@ -74,7 +287,7 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public Command command(int logSlotNum) {
-    assertWithMessage(false, "PaxosServer.command: Unimplemented");
+    // assertWithMessage(false, "PaxosServer.command: Unimplemented");
     return null;
   }
 
@@ -108,30 +321,5 @@ public class PaxosServer extends Node {
     // assertWithMessage(false, "PaxosServer.lastNonEmpty: Unimplemented");
     // TODO: implement this for test 2
     return 0;
-  }
-
-  /* -----------------------------------------------------------------------------------------------
-   *  Message Handlers
-   * ---------------------------------------------------------------------------------------------*/
-  private void handlePaxosRequest(PaxosRequest m, Address sender) {
-    assertWithMessage(false, "PaxosServer.handlePaxosRequest: Unimplemented");
-  }
-
-  // Your code here...
-
-  /* -----------------------------------------------------------------------------------------------
-   *  Timer Handlers
-   * ---------------------------------------------------------------------------------------------*/
-  // Your code here...
-
-  /* -----------------------------------------------------------------------------------------------
-   *  Utils
-   * ---------------------------------------------------------------------------------------------*/
-
-  private void assertWithMessage(boolean b, String m) {
-    if (!b) {
-      System.out.println(m);
-      System.exit(1);
-    }
   }
 }

@@ -52,7 +52,8 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public PaxosLogSlotStatus status(int logSlotNum) {
-    // Your code here...
+    // assertWithMessage(false, "PaxosServer.status: Unimplemented");
+    // TODO: implement this for test 2
     return null;
   }
 
@@ -73,7 +74,7 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public Command command(int logSlotNum) {
-    // Your code here...
+    assertWithMessage(false, "PaxosServer.command: Unimplemented");
     return null;
   }
 
@@ -88,7 +89,8 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public int firstNonCleared() {
-    // Your code here...
+    // assertWithMessage(false, "PaxosServer.firstNonCleared: Unimplemented");
+    // TODO: implement this for test 2
     return 1;
   }
 
@@ -103,7 +105,8 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public int lastNonEmpty() {
-    // Your code here...
+    // assertWithMessage(false, "PaxosServer.lastNonEmpty: Unimplemented");
+    // TODO: implement this for test 2
     return 0;
   }
 
@@ -111,7 +114,7 @@ public class PaxosServer extends Node {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void handlePaxosRequest(PaxosRequest m, Address sender) {
-    // Your code here...
+    assertWithMessage(false, "PaxosServer.handlePaxosRequest: Unimplemented");
   }
 
   // Your code here...
@@ -124,5 +127,11 @@ public class PaxosServer extends Node {
   /* -----------------------------------------------------------------------------------------------
    *  Utils
    * ---------------------------------------------------------------------------------------------*/
-  // Your code here...
+
+  private void assertWithMessage(boolean b, String m) {
+    if (!b) {
+      System.out.println(m);
+      System.exit(1);
+    }
+  }
 }

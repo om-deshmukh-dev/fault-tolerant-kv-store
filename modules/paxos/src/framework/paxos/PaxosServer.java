@@ -90,7 +90,7 @@ public class PaxosServer extends Node {
 
     // every server initially thinks they are the leader
     this.isLeaderElected = true; // TODO: change to false (but for now skip leader election process)
-    this.ballotHighestSeen = new Ballot(0, address);
+    this.ballotHighestSeen = new Ballot(0, servers[0]);
 
     this.logValues = new HashMap<>();
     this.commanderWaitForPerSlot = new HashMap<>();
@@ -102,11 +102,14 @@ public class PaxosServer extends Node {
   }
 
   /* -----------------------------------------------------------------------------------------------
-   *  Message Handlers
+   *  Message Handlers - Replicas
    * ---------------------------------------------------------------------------------------------*/
   private void handlePaxosRequest(PaxosRequest m, Address sender) {
     assertWithMessage(!amoApplication.alreadyExecuted(m.command()), "PaxosServer.handlePaxosRequest: Command already executed");
-    assertWithMessage(isLeader(), "PaxosServer.handlePaxosRequest: Not the leader");
+
+    // replicas that are not the leader will drop requests
+    if (!isLeader()) { return; }
+
     assertWithMessage(getReqLogStatus(m) == PaxosLogSlotStatus.EMPTY, "PaxosServer.handlePaxosRequest: Request non-empty status");
 
     // leader will put command into first empty slot, and send P2a message to all
@@ -115,6 +118,14 @@ public class PaxosServer extends Node {
 
     resetCommanderWaitFor(emptySlotNum);
     sendAllExceptSelf(new P2a(this.ballotSelf, emptySlotNum, m.command()));
+  }
+
+  /* -----------------------------------------------------------------------------------------------
+   *  Message Handlers - Commanders
+   * ---------------------------------------------------------------------------------------------*/
+
+  private void handleP2b(P2b p2b, Address sender) {
+    assertWithMessage(false, "PaxosServer.handleP2b: unimplemented (at " + this.address() + ", from " + sender + "), isLeader=" + this.ballotHighestSeen);
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -155,7 +166,7 @@ public class PaxosServer extends Node {
         break;
     }
 
-    assertWithMessage(false, "YAY");
+    send(new P2b(p2a.ballot(), p2a.slotNum()), sender);
   }
 
   /* -----------------------------------------------------------------------------------------------

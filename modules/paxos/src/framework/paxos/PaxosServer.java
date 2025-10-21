@@ -88,7 +88,7 @@ public class PaxosServer extends Node {
      */
     this.ballotSelf = new Ballot(0, address);
 
-    // every server initially thinks they are the leader
+    // every server initially thinks that server[0] is the leader (no split brain)
     this.isLeaderElected = true; // TODO: change to false (but for now skip leader election process)
     this.ballotHighestSeen = new Ballot(0, servers[0]);
 
@@ -125,7 +125,36 @@ public class PaxosServer extends Node {
    * ---------------------------------------------------------------------------------------------*/
 
   private void handleP2b(P2b p2b, Address sender) {
-    assertWithMessage(false, "PaxosServer.handleP2b: unimplemented (at " + this.address() + ", from " + sender + "), isLeader=" + this.ballotHighestSeen);
+    // only a leader should process p2b messages
+    if (!isLeader()) { return; }
+
+    // it can be assumed that p2b is only received when the acceptor
+    // has adopted a ballot with the same address as this server
+    assertWithMessage(p2b.ballot().address().equals(this.address()) && p2b.ballot().compareTo(this.ballotSelf) <= 0,
+                    "PaxosServer.handleP2b: receiving failed p2b reply (which acceptors currently do not send)");
+
+    // do not process smaller ballots (stale)
+    if (p2b.ballot().compareTo(this.ballotSelf) < 0) { return; }
+
+    switch (status(p2b.slotNum())) {
+      case EMPTY:
+        assertWithMessage(false, "PaxosServer.handleP2b: slot " + p2b.slotNum() + " is empty (even though this commander sent it)");
+        break;
+      case ACCEPTED:
+        assertWithMessage(commanderWaitForPerSlot.containsKey(p2b.slotNum()),
+            "PaxosServer.handleP2b: server should still have accepted slot from cmdrWaitForPerSlot");
+        // TODO: need to finish p2b processing
+        assertWithMessage(false, "PaxosServer.handleP2b: YIPPEE (close to done)");
+        break;
+      case CHOSEN:
+        assertWithMessage(!commanderWaitForPerSlot.containsKey(p2b.slotNum()),
+            "PaxosServer.handleP2b: server should have removed chosen slot from cmdrWaitForPerSlot");
+        // can just ignore p2b
+        break;
+      case CLEARED:
+        assertWithMessage(false, "PaxosServer.handleP2b: handle cleared case");
+        break;
+    }
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -158,7 +187,7 @@ public class PaxosServer extends Node {
         break;
       case CHOSEN:
         assertWithMessage(p2a.command().equals(logValues.get(p2a.slotNum()).amoCommand()),
-                      "PaxosServer.handleP2a: Cmd from request is the same as cmd in slot");
+                      "PaxosServer.handleP2a: Cmd from request is not the same as cmd in slot");
         // do not need to do anything really
         break;
       case CLEARED:

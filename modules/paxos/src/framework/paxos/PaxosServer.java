@@ -172,8 +172,8 @@ public class PaxosServer extends Node {
         if (isMinority(commanderWaitForPerSlot.get(p2bPVal.slotNum()))) {
           setChosenAndExecPrefix(p2bPVal);
           commanderWaitForPerSlot.remove(p2bPVal.slotNum());
+          sendAllExceptSelf(new Decision(p2bPVal));
         }
-        sendAllExceptSelf(new Decision(p2bPVal));
         break;
       case CHOSEN:
         assertWithMessage(!commanderWaitForPerSlot.containsKey(p2bPVal.slotNum()),

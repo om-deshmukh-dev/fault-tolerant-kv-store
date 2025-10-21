@@ -2,6 +2,7 @@ package framework.paxos;
 
 import framework.atmostonce.AMOApplication;
 import framework.atmostonce.AMOCommand;
+import framework.atmostonce.AMOResult;
 import framework.Address;
 import framework.Application;
 import framework.Command;
@@ -107,6 +108,8 @@ public class PaxosServer extends Node {
     this.ballotHighestSeen = new Ballot(0, servers[0]);
 
     this.logValues = new HashMap<>();
+    this.slotOut = LOG_START;
+
     this.commanderWaitForPerSlot = new HashMap<>();
   }
 
@@ -137,8 +140,40 @@ public class PaxosServer extends Node {
   }
 
   private void handleDecision(Decision decision, Address sender) {
-    assertWithMessage(false,
-        "PaxosServer.handleDecision: Server " + this.address() + " Got decision for slot " + decision.pValue().slotNum() + " from " + decision.pValue().ballot().address());
+    PValue pValDecision = decision.pValue();
+
+    assertWithMessage(!pValDecision.ballot().equals(this.ballotSelf),
+                    "PaxosServer.handleDecision: server " + this.address() + " sent itself decision");
+
+    // to reduce concurrent leader time, adopt during decision
+    if (pValDecision.ballot().compareTo(this.ballotHighestSeen) > 0) {
+      changeBallotOnPreemption(pValDecision.ballot());
+    }
+
+    switch (status(pValDecision.slotNum())) {
+      case EMPTY:
+        setChosenAndExecPrefix(pValDecision);
+        break;
+      case ACCEPTED:
+        assertWithMessage(pValDecision.ballot().compareTo(this.logValues.get(pValDecision.slotNum()).ballot()) >= 0,
+                          "PaxosServer.handleDecision: ballot in decision is not larger than ballot in log slot for decision");
+        setChosenAndExecPrefix(pValDecision);
+        break;
+      case CHOSEN:
+        assertWithMessage(pValDecision.amoCommand().equals(this.logValues.get(pValDecision.slotNum()).amoCommand()),
+                          "PaxosServer.handleDecision: two different commands chosen for same slot");
+        // do not need to do anything else
+        break;
+      case CLEARED:
+        assertWithMessage(false, "PaxosServer.handleDecision: handle CLEARED case");
+        break;
+    }
+
+    // send back result to client
+    assertWithMessage(this.amoApplication.alreadyExecuted(pValDecision.amoCommand()),
+                    "PaxosServer.handleDecision: chosen value should have been executed by this point");
+    AMOResult amoResult = this.amoApplication.execute(pValDecision.amoCommand());
+    send(new PaxosReply(amoResult), pValDecision.amoCommand().address());
   }
 
   /* -----------------------------------------------------------------------------------------------

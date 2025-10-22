@@ -425,7 +425,17 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public Command command(int logSlotNum) {
-    // assertWithMessage(false, "PaxosServer.command: Unimplemented");
+    switch (status(logSlotNum)) {
+      case EMPTY:
+        break;
+      case ACCEPTED: case CHOSEN:
+        assertWithMessage(this.logValues.containsKey(logSlotNum),
+                        "PaxosServer.command: slot " + logSlotNum + " is accepted but not in log");
+        return this.logValues.get(logSlotNum).amoCommand().command();
+      case CLEARED:
+        assertWithMessage(false, "PaxosServer.command: handle cleared case on slot " + logSlotNum);
+        break;
+    }
     return null;
   }
 
@@ -440,9 +450,8 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public int firstNonCleared() {
-    // assertWithMessage(false, "PaxosServer.firstNonCleared: Unimplemented");
-    // TODO: implement this for test 2
-    return 1;
+    // TODO: implement this eventually once adding in garbage collection
+    return LOG_START;
   }
 
   /**
@@ -456,8 +465,13 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public int lastNonEmpty() {
-    // assertWithMessage(false, "PaxosServer.lastNonEmpty: Unimplemented");
-    // TODO: implement this for test 2
-    return 0;
+    // TODO: implement correctly when handling cleared slots (start at the last cleared slot)
+    int slot_nonempty_max = 0;
+    for (Integer slot : this.logValues.keySet()) {
+      assertWithMessage(status(slot) == PaxosLogSlotStatus.ACCEPTED || status(slot) == PaxosLogSlotStatus.CHOSEN,
+                        "PaxosServer.lastNonEmpty: slot " + slot + " in log has status " + status(slot));
+      slot_nonempty_max = Math.max(slot_nonempty_max, slot);
+    }
+    return slot_nonempty_max;
   }
 }

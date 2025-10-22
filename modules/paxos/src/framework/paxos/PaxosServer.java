@@ -14,6 +14,7 @@ import java.util.HashSet;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.ToString;
+import lombok.extern.java.Log;
 
 @ToString(callSuper = true)
 @EqualsAndHashCode(callSuper = true)
@@ -146,14 +147,20 @@ public class PaxosServer extends Node {
         break;
       case ACCEPTED:
         // leader will repropose request to drive progress
+        // NOTE: the CommanderWaitFor does not need to be reset
         int reqLogSlot = getReqLogSlot(m);
         LogEntry entry = this.logValues.get(reqLogSlot);
-        assertWithMessage(this.ballotSelf.equals(entry.ballot()),"PaxosServer: leader should already have accept all accepted log entries");
+
+        assertWithMessage(this.commanderWaitForPerSlot.containsKey(reqLogSlot),
+                        "PaxosServer: leader should have already set commanderWaitFor for each accepted entry");
+        assertWithMessage(this.ballotSelf.equals(entry.ballot()),
+                        "PaxosServer: leader should already have accept all accepted log entries");
+
         sendAllExceptSelf(new P2a(new PValue(entry.ballot(), reqLogSlot, entry.amoCommand())));
         break;
       case CHOSEN:
-        assertWithMessage(false,
-            "PaxosServer.handlePaxosRequest: chosen but not executed. handle re-proposing log entries");
+        fillGapsWithNoop(getReqLogSlot(m));
+        reproposeAllAcceptedSlots();
         break;
       case CLEARED:
         assertWithMessage(false,
@@ -196,12 +203,12 @@ public class PaxosServer extends Node {
       // do not need to do anything
     }
     else if (this.amoApplication.alreadyExecuted(pValDecision.amoCommand())) {
+      // can send response back to client
       AMOResult amoResult = this.amoApplication.execute(pValDecision.amoCommand());
       send(new PaxosReply(amoResult), pValDecision.amoCommand().address());
     }
     else {
-      return;
-      //assertWithMessage(false, "fill holes in log");
+      // DO NOT DO ANYTHING HERE: non-leaders can receive decisions
     }
   }
 
@@ -364,6 +371,51 @@ public class PaxosServer extends Node {
         this.amoApplication.execute(amoCommandSlotOut);
       }
       this.slotOut += 1;
+    }
+  }
+
+  // fills all EMPTY slots before the argument to ACCEPTED with a NOOP command, and resets
+  // the WaitFor for each slot (so that the leader can begin sending P2a messages right away).
+  // this function assumes that the server calling this function is the leader (as only
+  // the leader can arbitrarily fill empty slots with accepted commands), and
+  // that the slot for the argument is CHOSEN
+  private void fillGapsWithNoop(int slotEndFilling) {
+    assertWithMessage(isLeader(), "PaxosServer.fillGapsWithNoop: non-leader trying to fill gaps");
+    assertWithMessage(status(slotEndFilling) == PaxosLogSlotStatus.CHOSEN, "PaxosServer.fillGapsWithNoop: end of gap is not a CHOSEN command");
+    assertWithMessage(slotEndFilling >= LOG_START, "PaxosServer.fillGapsWithNoop: improper log slot " + slotEndFilling);
+
+    for (int slotToFill = LOG_START; slotToFill < slotEndFilling; slotToFill++) {
+      if (status(slotToFill) == PaxosLogSlotStatus.EMPTY) {
+        this.logValues.put(slotToFill,
+            new LogEntry(genCmdNoOp(), this.ballotSelf, PaxosLogSlotStatus.ACCEPTED)
+        );
+        resetCommanderWaitFor(slotToFill);
+      }
+    }
+  }
+
+  // send a P2a message for each accepted slot to all except self.
+  // this function assumes that the caller is the leader, that
+  // every slot has a commanderWaitFor entry (should already be populated)
+  // and that every accepted slot in the leader's log has the leader's ballot
+  // (allowing for the leader to skip sending to themselves)
+  private void reproposeAllAcceptedSlots() {
+    assertWithMessage(isLeader(), "PaxosServer.reproposeAllAcceptedSlots: caller is not leader");
+
+    for (Integer slotNum : this.logValues.keySet()) {
+      if (status(slotNum) == PaxosLogSlotStatus.ACCEPTED) {
+        assertWithMessage(this.commanderWaitForPerSlot.containsKey(slotNum),
+                        "PaxosServer.reproposeAllAcceptedSlots: slot " + slotNum + " is accepted but no cmdWaitFor set");
+        assertWithMessage(!isMinority(this.commanderWaitForPerSlot.get(slotNum)),
+                        "PaxosServer.reproposeAllAcceptedSlots: slot " + slotNum + " already has minority cmdWaitFor");
+        assertWithMessage(this.logValues.get(slotNum).ballot().equals(this.ballotSelf),
+                        "PaxosServer.reproposeAllAcceptedSlots: leader should have already replaced all accepted ballots with their own");
+
+        LogEntry entry = this.logValues.get(slotNum);
+        sendAllExceptSelf(new P2a(
+            new PValue(entry.ballot(), slotNum, entry.amoCommand()))
+        );
+      }
     }
   }
 

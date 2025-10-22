@@ -42,7 +42,7 @@ public final class PaxosClient extends Node implements Client {
     this.result = null;
 
     sendToAll(request);
-    // TODO: add timer
+    set(new ClientTimer(request), ClientTimer.CLIENT_RETRY_MILLIS);
   }
 
   @Override
@@ -73,7 +73,10 @@ public final class PaxosClient extends Node implements Client {
    *  Timer Handlers
    * ---------------------------------------------------------------------------------------------*/
   private synchronized void onClientTimer(ClientTimer t) {
-    // TODO: add timer
+    if (t.request().command().sequenceNum() == this.sequenceNum) {
+      sendToAll(t.request());
+      set(t, ClientTimer.CLIENT_RETRY_MILLIS);
+    }
   }
 
   /**

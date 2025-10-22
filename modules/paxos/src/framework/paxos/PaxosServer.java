@@ -23,6 +23,7 @@ public class PaxosServer extends Node {
   private final AMOApplication<Application> amoApplication;
 
   private static final int LOG_START = 1;
+  private static final int LOG_UNKNOWN = 0;
 
   @Data
   public static class Ballot implements Comparable<Ballot>, Serializable {
@@ -122,21 +123,41 @@ public class PaxosServer extends Node {
    *  Message Handlers - Replicas
    * ---------------------------------------------------------------------------------------------*/
   private void handlePaxosRequest(PaxosRequest m, Address sender) {
-    assertWithMessage(!amoApplication.alreadyExecuted(m.command()), "PaxosServer.handlePaxosRequest: Command already executed");
+    // a server that has already executed the request can immediately send back a reply
+    if (this.amoApplication.alreadyExecuted(m.command())) {
+      AMOResult amoResult = this.amoApplication.execute(m.command());
+      send(new PaxosReply(amoResult), sender);
+      return;
+    }
 
-    // replicas that are not the leader will drop requests
+    // replicas that are not the leader will not perform request processing
     if (!isLeader()) { return; }
 
-    assertWithMessage(getReqLogStatus(m) == PaxosLogSlotStatus.EMPTY, "PaxosServer.handlePaxosRequest: Request non-empty status");
+    switch (getReqLogStatus(m)) {
+      case EMPTY:
+        // leader will put command into first empty slot, and send P2a message to all
+        int emptySlotNum = findFirstEmptySlot();
+        logValues.put(emptySlotNum, new LogEntry(m.command(), this.ballotSelf, PaxosLogSlotStatus.ACCEPTED));
 
-    // leader will put command into first empty slot, and send P2a message to all
-    int emptySlotNum = findFirstEmptySlot();
-    logValues.put(emptySlotNum, new LogEntry(m.command(), this.ballotSelf, PaxosLogSlotStatus.ACCEPTED));
-
-    resetCommanderWaitFor(emptySlotNum);
-    sendAllExceptSelf(new P2a(
-        new PValue(this.ballotSelf, emptySlotNum, m.command())
-    ));
+        resetCommanderWaitFor(emptySlotNum);
+        sendAllExceptSelf(new P2a(new PValue(this.ballotSelf, emptySlotNum, m.command())));
+        break;
+      case ACCEPTED:
+        // leader will repropose request to drive progress
+        int reqLogSlot = getReqLogSlot(m);
+        LogEntry entry = this.logValues.get(reqLogSlot);
+        assertWithMessage(this.ballotSelf.equals(entry.ballot()),"PaxosServer: leader should already have accept all accepted log entries");
+        sendAllExceptSelf(new P2a(new PValue(entry.ballot(), reqLogSlot, entry.amoCommand())));
+        break;
+      case CHOSEN:
+        assertWithMessage(false,
+            "PaxosServer.handlePaxosRequest: chosen but not executed. handle re-proposing log entries");
+        break;
+      case CLEARED:
+        assertWithMessage(false,
+            "PaxosServer: cleared command " + m.command() + " must already be executed");
+        break;
+    }
   }
 
   private void handleDecision(Decision decision, Address sender) {
@@ -169,11 +190,14 @@ public class PaxosServer extends Node {
         break;
     }
 
-    // send back result to client
-    assertWithMessage(this.amoApplication.alreadyExecuted(pValDecision.amoCommand()),
-                    "PaxosServer.handleDecision: chosen value should have been executed by this point");
-    AMOResult amoResult = this.amoApplication.execute(pValDecision.amoCommand());
-    send(new PaxosReply(amoResult), pValDecision.amoCommand().address());
+    if (this.amoApplication.alreadyExecuted(pValDecision.amoCommand())) {
+      // send back result to client
+      AMOResult amoResult = this.amoApplication.execute(pValDecision.amoCommand());
+      send(new PaxosReply(amoResult), pValDecision.amoCommand().address());
+    } else {
+      return;
+      //assertWithMessage(false, "fill holes in log");
+    }
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -281,7 +305,6 @@ public class PaxosServer extends Node {
   // If the log is empty, will return 1.
   private int findFirstEmptySlot() {
     // TODO: add in garbage collection logic
-
     int logSlotNum = LOG_START;
     while (logValues.containsKey(logSlotNum)) {
       logSlotNum++;
@@ -289,18 +312,29 @@ public class PaxosServer extends Node {
     return logSlotNum;
   }
 
+  // Get the log entry of the slot that holds the amoCommand in the request, and returns
+  // NULL if no log slot contains the request's command.
+  // It is assumed that at most one log slot will contain the command in the request.
+  private int getReqLogSlot(PaxosRequest request) {
+    for (Integer slotNum : this.logValues.keySet()) {
+      LogEntry entry = this.logValues.get(slotNum);
+      assertWithMessage(slotNum >= LOG_START, "PaxosServer.getReqLogSlot: logValues contains invalid slot " + slotNum);
+
+      if (request.command().equals(entry.amoCommand())) {
+        assertWithMessage(entry.status == PaxosLogSlotStatus.ACCEPTED || entry.status == PaxosLogSlotStatus.CHOSEN,
+            "PaxosServer.getReqLogSlot: request in log has malformed status " + entry.status);
+        return slotNum;
+      }
+    }
+    return LOG_UNKNOWN;
+  }
+
   // Get the log status of the slot that holds the amoCommand in the request.
   // It is assumed that at most one log slot will contain the command in the request.
   private PaxosLogSlotStatus getReqLogStatus(PaxosRequest request) {
     // TODO: handle returning CLEARED status
-    for (LogEntry entry : logValues.values()) {
-      if (entry.amoCommand().equals(request.command())) {
-        assertWithMessage(entry.status == PaxosLogSlotStatus.ACCEPTED || entry.status == PaxosLogSlotStatus.CHOSEN,
-                            "PaxosServer.getReqLogStatus: request in log has malformed status " + entry.status);
-        return entry.status;
-      }
-    }
-    return PaxosLogSlotStatus.EMPTY;
+    int reqLogSlot = getReqLogSlot(request);
+    return (reqLogSlot == LOG_UNKNOWN) ? PaxosLogSlotStatus.EMPTY : status(reqLogSlot);
   }
 
   // Will set the slot associated with the `pValue` to CHOSEN, and will then

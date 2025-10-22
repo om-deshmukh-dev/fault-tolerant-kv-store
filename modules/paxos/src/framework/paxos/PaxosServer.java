@@ -124,6 +124,8 @@ public class PaxosServer extends Node {
    * ---------------------------------------------------------------------------------------------*/
   private void handlePaxosRequest(PaxosRequest m, Address sender) {
     // a server that has already executed the request can immediately send back a reply
+    assertWithMessage(!isCmdNoOp(m.command()), "PaxosServer.handlePaxosRequest: client can never send noop");
+
     if (this.amoApplication.alreadyExecuted(m.command())) {
       AMOResult amoResult = this.amoApplication.execute(m.command());
       send(new PaxosReply(amoResult), sender);
@@ -190,11 +192,14 @@ public class PaxosServer extends Node {
         break;
     }
 
-    if (this.amoApplication.alreadyExecuted(pValDecision.amoCommand())) {
-      // send back result to client
+    if (isCmdNoOp(pValDecision.amoCommand())) {
+      // do not need to do anything
+    }
+    else if (this.amoApplication.alreadyExecuted(pValDecision.amoCommand())) {
       AMOResult amoResult = this.amoApplication.execute(pValDecision.amoCommand());
       send(new PaxosReply(amoResult), pValDecision.amoCommand().address());
-    } else {
+    }
+    else {
       return;
       //assertWithMessage(false, "fill holes in log");
     }
@@ -316,6 +321,8 @@ public class PaxosServer extends Node {
   // NULL if no log slot contains the request's command.
   // It is assumed that at most one log slot will contain the command in the request.
   private int getReqLogSlot(PaxosRequest request) {
+    assertWithMessage(!isCmdNoOp(request.command()), "PaxosServer.getReqLogSlot: client request is NOOP, when it should never be");
+
     for (Integer slotNum : this.logValues.keySet()) {
       LogEntry entry = this.logValues.get(slotNum);
       assertWithMessage(slotNum >= LOG_START, "PaxosServer.getReqLogSlot: logValues contains invalid slot " + slotNum);
@@ -349,10 +356,14 @@ public class PaxosServer extends Node {
     );
 
     while (status(this.slotOut) == PaxosLogSlotStatus.CHOSEN) {
-      assertWithMessage(!this.amoApplication.alreadyExecuted(pValue.amoCommand()),
-                      "PaxosServer.setChosenAndExecPrefix: slot " + pValue.slotNum() + " is being set to CHOSEN, but was alreadyExecuted");
-      this.amoApplication.execute(pValue.amoCommand());
-      this.slotOut++;
+      AMOCommand amoCommandSlotOut = this.logValues.get(this.slotOut).amoCommand();
+
+      if (!isCmdNoOp(amoCommandSlotOut)) {
+        assertWithMessage(!this.amoApplication.alreadyExecuted(amoCommandSlotOut),
+            "PaxosServer.setChosenAndExecPrefix (server " + this.address() + "): slot " + this.slotOut + " is being set to CHOSEN, but was alreadyExecuted");
+        this.amoApplication.execute(amoCommandSlotOut);
+      }
+      this.slotOut += 1;
     }
   }
 
@@ -385,6 +396,15 @@ public class PaxosServer extends Node {
         this.commanderWaitForPerSlot.get(slotNum).add(server);
       }
     }
+  }
+
+  // helpers for NOOP commands:
+  private AMOCommand genCmdNoOp() {
+    return new AMOCommand(null, null, -1);
+  }
+
+  private boolean isCmdNoOp(AMOCommand amoCommand) {
+    return amoCommand.command() == null && amoCommand.address() == null && amoCommand.sequenceNum() == -1;
   }
 
   // message helpers:
@@ -465,6 +485,7 @@ public class PaxosServer extends Node {
       case ACCEPTED: case CHOSEN:
         assertWithMessage(this.logValues.containsKey(logSlotNum),
                         "PaxosServer.command: slot " + logSlotNum + " is accepted but not in log");
+        assertWithMessage(!isCmdNoOp(this.logValues.get(logSlotNum).amoCommand()), "PaxosServer.command: handle NOOP case");
         return this.logValues.get(logSlotNum).amoCommand().command();
       case CLEARED:
         assertWithMessage(false, "PaxosServer.command: handle cleared case on slot " + logSlotNum);

@@ -156,6 +156,7 @@ public class PaxosServer extends Node {
         assertWithMessage(this.ballotSelf.equals(entry.ballot()),
                         "PaxosServer: leader should already have accept all accepted log entries");
 
+        // TODO: maybe change this to repropose to all
         sendAllExceptSelf(new P2a(new PValue(entry.ballot(), reqLogSlot, entry.amoCommand())));
         break;
       case CHOSEN:

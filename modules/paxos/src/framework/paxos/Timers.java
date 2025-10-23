@@ -9,4 +9,12 @@ final class ClientTimer implements Timer {
   private final PaxosRequest request;
 }
 
-// Your code here...
+@Data
+final class HeartbeatTimer implements Timer {
+  static final int HEARTBEAT_RETRY_MILLIS = 25;
+}
+
+@Data
+final class HeartbeatCheckTimer implements Timer {
+  static final int HEARTBEAT_CHECK_RETRY_MILLIS = 100;
+}

@@ -33,3 +33,9 @@ final class P2b implements Message {
 final class Decision implements Message {
   private final PValue pValue;
 }
+
+@Data
+final class Heartbeat implements Message {
+  private final Ballot ballot;
+  private final HashMap<Integer, LogEntry> log;
+}

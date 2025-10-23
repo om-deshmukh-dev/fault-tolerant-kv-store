@@ -68,11 +68,14 @@ public class PaxosServer extends Node {
     }
   }
 
-  /** Common Data Structures Used By Most Roles: */
+  /** Paxos Data Structures: **/
 
   // isLeaderElected and ballotHighestSeen together define who this server thinks the current leader is
   private boolean isLeaderElected;
   private Ballot ballotHighestSeen;
+
+  // replica uses this to determine when it should start leader election again
+  private boolean gotHeartbeatFromLeader;
 
   // Used to bribe acceptors (P1) so that proposed values (P2) respect the write-once register
   // abstraction once a value is chosen. The ballots are totally ordered among all servers.
@@ -112,6 +115,7 @@ public class PaxosServer extends Node {
     // no one is elected yet, perform leader election upon init()
     this.isLeaderElected = false;
     this.ballotHighestSeen = new Ballot(0, address);
+    this.gotHeartbeatFromLeader = false;
 
     this.logValues = new HashMap<>();
     this.slotOut = LOG_START;
@@ -123,13 +127,11 @@ public class PaxosServer extends Node {
   @Override
   public void init() {
     assertWithMessage(!this.isLeaderElected, "PaxosServer.init: no one should be elected yet");
-    assertWithMessage(this.ballotHighestSeen.equals(this.ballotSelf),
-                    "PaxosServer.init: server should have itself as the highest ballot seen");
+    initLeaderElection();
 
-    // reset scoutWaitFor to FullSet \ {self} (this server already
-    // adopted their own ballot) and send P1a to all (drive leader election)
-    resetWaitFor(this.scoutWaitFor);
-    sendAllExceptSelf(new P1a(this.ballotSelf));
+    // set up pulsating heartbeat check timers to know when to re-initiate leader election
+    set(new HeartbeatCheckTimer(), HeartbeatCheckTimer.HEARTBEAT_CHECK_RETRY_MILLIS);
+    set(new HeartbeatTimer(), HeartbeatTimer.HEARTBEAT_RETRY_MILLIS);
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -251,6 +253,19 @@ public class PaxosServer extends Node {
     }
   }
 
+  private void handleHeartbeat(Heartbeat heartbeat, Address sender) {
+    assertWithMessage(!heartbeat.ballot().address().equals(this.address()), "PaxosServer.handleHeartbeat: Got heartbeat from self");
+
+    if (heartbeat.ballot().compareTo(this.ballotHighestSeen) > 0) {
+      // elect the sender of the heartbeat as the new leader (also sets gotHeartbeat)
+      changeBallotOnPreemption(heartbeat.ballot());
+    }
+    else if (isAnotherServerElected() && heartbeat.ballot().equals(this.ballotHighestSeen)) {
+      this.gotHeartbeatFromLeader = true;
+    }
+    // TODO: add in log merging and heartbeat reply
+  }
+
   /* -----------------------------------------------------------------------------------------------
    *  Message Handlers - Commanders
    * ---------------------------------------------------------------------------------------------*/
@@ -354,11 +369,56 @@ public class PaxosServer extends Node {
   /* -----------------------------------------------------------------------------------------------
    *  Timer Handlers
    * ---------------------------------------------------------------------------------------------*/
-  // Your code here...
+
+  // pulsating timer that this server uses to check if the leader is alive,
+  // and if not, will re-initiate leader election
+  private void onHeartbeatCheckTimer(HeartbeatCheckTimer t) {
+    if (isAnotherServerElected() && !this.gotHeartbeatFromLeader) {
+      assertWithMessage(this.ballotHighestSeen.compareTo(this.ballotSelf) > 0,
+                        "PaxosServer.onHeartbeatCheckTimer: this server expected heartbeat from another, but does not think another is the leader somehow");
+      initLeaderElection();
+    }
+
+    this.gotHeartbeatFromLeader = false;
+    set(t, HeartbeatCheckTimer.HEARTBEAT_CHECK_RETRY_MILLIS);
+  }
+
+  // pulsating timer that a leader uses to tell everyone they are alive
+  private void onHeartbeatTimer(HeartbeatTimer t) {
+    if (isLeader()) {
+      sendAllExceptSelf(new Heartbeat(this.ballotSelf, this.logValues));
+    }
+    set(t, HeartbeatTimer.HEARTBEAT_RETRY_MILLIS);
+  }
 
   /* -----------------------------------------------------------------------------------------------
    *  Utils
    * ---------------------------------------------------------------------------------------------*/
+
+  // leader election helpers:
+
+  // initializes the leader election phase by changing this server's state to
+  // no longer think there's a leader, and to send out P1a messages to bribe acceptors.
+  // This function assumes that the server has not gotten a heartbeat from a leader
+  // within a given time interval.
+  private void initLeaderElection() {
+    assertWithMessage(!this.gotHeartbeatFromLeader, "PaxosServer.initLeaderElection: got heartbeat but still doing leader election");
+    assertWithMessage(this.ballotHighestSeen != null, "PaxosServer.initLeaderElection: highest ballot uninitialized");
+    assertWithMessage(!isLeader(), "PaxosServer.initLeaderElection: server thinks its the leader but is performing leader election");
+    assertWithMessage(this.ballotHighestSeen.compareTo(this.ballotSelf) >= 0, "PaxosServer.initLeaderElection: ballot of dead leader should be at least as large as this server's ballot");
+
+    this.isLeaderElected = false;
+    this.ballotSelf = new Ballot(this.ballotHighestSeen.sequenceNum() + 1, this.address());
+
+    // replica immediately adopts their own ballot (careful about reference vs copy
+    this.ballotHighestSeen = new Ballot(this.ballotSelf.sequenceNum(), this.ballotSelf.address());
+
+    // reset scoutWaitFor to FullSet \ {self} (this server already adopted
+    // their own ballot) and send P1a to all except self to drive leader election
+    this.scoutWaitFor = new HashSet<>();
+    resetWaitFor(this.scoutWaitFor);
+    sendAllExceptSelf(new P1a(this.ballotSelf));
+  }
 
   // log helpers:
 
@@ -475,6 +535,10 @@ public class PaxosServer extends Node {
   private boolean isLeader() {
     return this.isLeaderElected && this.ballotHighestSeen.address.equals(this.address());
   }
+  // Returns whether this server thinks another server is elected.
+  private boolean isAnotherServerElected() {
+    return this.isLeaderElected && !this.ballotHighestSeen.address.equals(this.address());
+  }
 
   // Will update the highest ballot seen to the argument, and set the
   // leader to the server associated with the highest ballot
@@ -484,7 +548,7 @@ public class PaxosServer extends Node {
 
     this.ballotHighestSeen = ballot;
     this.isLeaderElected = true;
-    // TODO: add heartbeat boolean change according to design
+    this.gotHeartbeatFromLeader = true;
   }
 
   // WaitFor Helpers:

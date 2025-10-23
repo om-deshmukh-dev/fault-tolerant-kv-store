@@ -13,8 +13,8 @@ import java.util.HashMap;
 import java.util.HashSet;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
+import lombok.NonNull;
 import lombok.ToString;
-import lombok.extern.java.Log;
 
 @ToString(callSuper = true)
 @EqualsAndHashCode(callSuper = true)
@@ -87,6 +87,10 @@ public class PaxosServer extends Node {
   private final HashMap<Integer, LogEntry> logValues;
   private int slotOut; // the earliest non-executed slot
 
+  // Replica (acting as a scout) uses this during leader election (P1) to wait for
+  // a majority of acceptors to adopt their ballot
+  private HashSet<Address> scoutWaitFor;
+
   // Leader (acting as commander) uses this to wait for a majority of acceptors to accept a
   // value for a slot (P2a sent, P2b received)
   private HashMap<Integer, HashSet<Address>> commanderWaitForPerSlot;
@@ -105,19 +109,27 @@ public class PaxosServer extends Node {
      */
     this.ballotSelf = new Ballot(0, address);
 
-    // every server initially thinks that server[0] is the leader (no split brain)
-    this.isLeaderElected = true; // TODO: change to false (but for now skip leader election process)
-    this.ballotHighestSeen = new Ballot(0, servers[0]);
+    // no one is elected yet, perform leader election upon init()
+    this.isLeaderElected = false;
+    this.ballotHighestSeen = new Ballot(0, address);
 
     this.logValues = new HashMap<>();
     this.slotOut = LOG_START;
 
+    this.scoutWaitFor = new HashSet<>();
     this.commanderWaitForPerSlot = new HashMap<>();
   }
 
   @Override
   public void init() {
-    // Your code here...
+    assertWithMessage(!this.isLeaderElected, "PaxosServer.init: no one should be elected yet");
+    assertWithMessage(this.ballotHighestSeen.equals(this.ballotSelf),
+                    "PaxosServer.init: server should have itself as the highest ballot seen");
+
+    // reset scoutWaitFor to FullSet \ {self} (this server already
+    // adopted their own ballot) and send P1a to all (drive leader election)
+    resetWaitFor(this.scoutWaitFor);
+    sendAllExceptSelf(new P1a(this.ballotSelf));
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -154,12 +166,13 @@ public class PaxosServer extends Node {
         assertWithMessage(this.commanderWaitForPerSlot.containsKey(reqLogSlot),
                         "PaxosServer: leader should have already set commanderWaitFor for each accepted entry");
         assertWithMessage(this.ballotSelf.equals(entry.ballot()),
-                        "PaxosServer: leader should already have accept all accepted log entries");
+                        "PaxosServer: leader should already have accepted all accepted log entries");
 
         // TODO: maybe change this to repropose to all
         sendAllExceptSelf(new P2a(new PValue(entry.ballot(), reqLogSlot, entry.amoCommand())));
         break;
       case CHOSEN:
+        // chosen but not executed => gaps
         fillGapsWithNoop(getReqLogSlot(m));
         reproposeAllAcceptedSlots();
         break;
@@ -167,6 +180,31 @@ public class PaxosServer extends Node {
         assertWithMessage(false,
             "PaxosServer: cleared command " + m.command() + " must already be executed");
         break;
+    }
+  }
+
+  private void handleP1b(P1b p1b, Address sender) {
+    assertWithMessage(p1b.log().isEmpty(), "PaxosServer.p1b: logs should currently be empty");
+
+    // only process P1b during leader election
+    if (this.isLeaderElected) { return; }
+
+    // at this point, replica is still performing leader election
+    assertWithMessage(this.ballotSelf.equals(this.ballotHighestSeen),
+                    "PaxosServer.p1b: replica in leader election should still think it has the highest ballot");
+
+    if (p1b.ballot().compareTo(this.ballotSelf) < 0) {
+      // ignore => probably from previous phase of leader election
+    } else if (p1b.ballot().compareTo(this.ballotSelf) == 0) {
+      // TODO: add in log merging
+      this.scoutWaitFor.remove(sender);
+      if (isMinority(this.scoutWaitFor)) {
+        // LEADER ELECTED!!!
+        // TODO: add in remaining leader election handling logic
+        this.isLeaderElected = true;
+      }
+    } else {
+      assertWithMessage(false, "PaxosServer.p1b: acceptors should not currently send failures");
     }
   }
 
@@ -261,6 +299,16 @@ public class PaxosServer extends Node {
   /* -----------------------------------------------------------------------------------------------
    *  Message Handlers - Acceptors
    * ---------------------------------------------------------------------------------------------*/
+
+  private void handleP1a(P1a p1a, Address sender) {
+    assertWithMessage(!p1a.ballot().address().equals(this.address()), "PaxosServer.handleP1a: should never get P1a from self");
+
+    if (p1a.ballot().compareTo(this.ballotHighestSeen) > 0) {
+      changeBallotOnPreemption(p1a.ballot());
+      assertWithMessage(p1a.ballot().equals(this.ballotHighestSeen), "PaxosServer.handleP1a: should have adopted higher ballot by now");
+      send(new P1b(this.ballotHighestSeen, this.logValues), sender);
+    }
+  }
 
   private void handleP2a(P2a p2a, Address sender) {
     PValue p2aPVal = p2a.pValue();
@@ -439,16 +487,24 @@ public class PaxosServer extends Node {
     // TODO: add heartbeat boolean change according to design
   }
 
-  // CommanderWaitForPerSlotHelper:
+  // WaitFor Helpers:
+
+  // reset a WaitFor set in-place to the FullSet \ {self}, implying
+  // this server will wait for everybody except itself. This function
+  // assumes the set passed in is initialized as the empty set.
+  private void resetWaitFor(@NonNull HashSet<Address> waitFor) {
+    assertWithMessage(waitFor.isEmpty(), "PaxosServer.resetWaitFor: waitFor set is not initialized as the empty set");
+    for (Address server : servers) {
+      if (!server.equals(this.address())) {
+        waitFor.add(server);
+      }
+    }
+  }
 
   // reset CommanderWaitFor for a slot to the FullSet \ { self }
   private void resetCommanderWaitFor(int slotNum) {
     this.commanderWaitForPerSlot.put(slotNum, new HashSet<>());
-    for (Address server : servers) {
-      if (!server.equals(this.address())) {
-        this.commanderWaitForPerSlot.get(slotNum).add(server);
-      }
-    }
+    resetWaitFor(this.commanderWaitForPerSlot.get(slotNum));
   }
 
   // helpers for NOOP commands:

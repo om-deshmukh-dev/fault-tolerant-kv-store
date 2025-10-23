@@ -133,6 +133,9 @@ public class PaxosServer extends Node {
     // set up pulsating heartbeat check timers to know when to re-initiate leader election
     set(new HeartbeatCheckTimer(), HeartbeatCheckTimer.HEARTBEAT_CHECK_RETRY_MILLIS);
     set(new HeartbeatTimer(), HeartbeatTimer.HEARTBEAT_RETRY_MILLIS);
+
+    // set up pulsating repropose timer that the leader uses to drive consensus
+    set(new ReproposeTimer(), ReproposeTimer.REPROPOSE_RETRY_MILLIS);
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -399,6 +402,13 @@ public class PaxosServer extends Node {
       sendAllExceptSelf(new Heartbeat(this.ballotSelf, this.logValues));
     }
     set(t, HeartbeatTimer.HEARTBEAT_RETRY_MILLIS);
+  }
+
+  private void onReproposeTimer(ReproposeTimer t) {
+    if (isLeader()) {
+      reproposeAllAcceptedSlots();
+    }
+    set(t, ReproposeTimer.REPROPOSE_RETRY_MILLIS);
   }
 
   /* -----------------------------------------------------------------------------------------------

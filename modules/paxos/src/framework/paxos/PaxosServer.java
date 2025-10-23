@@ -142,6 +142,12 @@ public class PaxosServer extends Node {
     // a server that has already executed the request can immediately send back a reply
     assertWithMessage(!isCmdNoOp(m.command()), "PaxosServer.handlePaxosRequest: client can never send noop");
 
+    if (!this.isLeaderElected) {
+      // still in leader election, drive progress
+      assertWithMessage(!isMinority(this.scoutWaitFor), "PaxosServer.handlePaxosRequest: non-leader waiting for minority but still in leader election");
+      sendAllExceptSelf(new P1a(this.ballotSelf));
+    }
+
     if (this.amoApplication.alreadyExecuted(m.command())) {
       AMOResult amoResult = this.amoApplication.execute(m.command());
       send(new PaxosReply(amoResult), sender);
@@ -171,8 +177,7 @@ public class PaxosServer extends Node {
         assertWithMessage(this.ballotSelf.equals(entry.ballot()),
                         "PaxosServer: leader should already have accepted all accepted log entries");
 
-        // TODO: maybe change this to repropose to all
-        sendAllExceptSelf(new P2a(new PValue(entry.ballot(), reqLogSlot, entry.amoCommand())));
+        reproposeAllAcceptedSlots();
         break;
       case CHOSEN:
         // chosen but not executed => gaps

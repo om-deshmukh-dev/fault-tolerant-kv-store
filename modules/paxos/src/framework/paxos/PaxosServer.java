@@ -247,7 +247,10 @@ public class PaxosServer extends Node {
     else if (isAnotherServerElected() && heartbeat.ballot().equals(this.ballotHighestSeen)) {
       this.gotHeartbeatFromLeader = true;
     }
+
+    // TODO: can drop heartbeat with lower ballot
     mergeLog(heartbeat.log());
+    // TODO: Maybe send back P2b for newly accepted slots
     // TODO: add in log merging and heartbeat reply
   }
 
@@ -539,7 +542,7 @@ public class PaxosServer extends Node {
   // Returns whether this server is the leader, i.e. thinks a
   // leader is elected and is part of the highest ballot seen
   private boolean isLeader() {
-    return this.isLeaderElected && this.ballotHighestSeen.address.equals(this.address());
+    return this.isLeaderElected && this.ballotHighestSeen.equals(this.ballotSelf);
   }
   // Returns whether this server thinks another server is elected.
   private boolean isAnotherServerElected() {

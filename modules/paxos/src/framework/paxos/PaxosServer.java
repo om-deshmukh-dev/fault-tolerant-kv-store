@@ -11,7 +11,6 @@ import framework.Node;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Set;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.NonNull;
@@ -128,6 +127,7 @@ public class PaxosServer extends Node {
     this.scoutWaitFor = new HashSet<>();
     this.commanderWaitForPerSlot = new HashMap<>();
 
+    // TODO: can initialize here to have every server have a slotOut of 1
     this.serverSlotOuts = new HashMap<>();
     this.globalMinSlotOut = 0;
   }
@@ -195,8 +195,9 @@ public class PaxosServer extends Node {
         reproposeAllAcceptedSlots();
         break;
       case CLEARED:
-        // assertWithMessage(false,
-        //     "PaxosServer: cleared command " + m.command() + " must already be executed");
+        // TODO: This should remain uncommented
+         assertWithMessage(false,
+             "PaxosServer: cleared command " + m.command() + " must already be executed");
         break;
     }
   }
@@ -251,6 +252,7 @@ public class PaxosServer extends Node {
         setChosenAndExecPrefix(pValDecision);
         break;
       case CHOSEN:
+        // TODO: a CHOSEN slot must still be in the log, can add another assertion checking the slotNum is in logValues
         // verify commands match (unless slot has been garbage collected)
         if (this.logValues.containsKey(pValDecision.slotNum())) {
           assertWithMessage(pValDecision.amoCommand().equals(this.logValues.get(pValDecision.slotNum()).amoCommand()),
@@ -306,22 +308,14 @@ public class PaxosServer extends Node {
     // update the sender's execution progress
     this.serverSlotOuts.put(sender, reply.slotOut());
 
-    // if sender is behind, send them missing decisions to help them catch up
-    // start from their slotOut, but don't send already garbage collected slots
-    int startSlot = Math.max(reply.slotOut(), this.globalMinSlotOut + 1);
-    for (int slot = startSlot; slot < this.slotOut; slot++) {
-      if (status(slot) == PaxosLogSlotStatus.CHOSEN && this.logValues.containsKey(slot)) {
-        LogEntry entry = this.logValues.get(slot);
-        send(new Decision(new PValue(entry.ballot(), slot, entry.amoCommand())), sender);
-      }
-    }
-
+    // TODO: minSlotOut should be set to globalMinSlotOut + 1 (also, should only compute globalMinSlotOut when a slotOut has been seen from all other servers)
     // calculate the global minimum slotOut (include leader's own slotOut)
     int minSlotOut = this.slotOut;
     for (Integer followerSlotOut : this.serverSlotOuts.values()) {
       minSlotOut = Math.min(minSlotOut, followerSlotOut);
     }
 
+    assertWithMessage(minSlotOut > 0, "PaxosServer.handleHeartbeatReply: minSlotOut must be > 0");
     this.globalMinSlotOut = minSlotOut - 1;
   }
 
@@ -413,11 +407,13 @@ public class PaxosServer extends Node {
         logValues.put(p2aPVal.slotNum(), new LogEntry(p2aPVal.amoCommand(), p2aPVal.ballot(), PaxosLogSlotStatus.ACCEPTED));
         break;
       case CHOSEN:
+        // TODO: can assert that the slot number must still be in the log
         // verify command matches what we have if entry still exists
         if (logValues.containsKey(p2aPVal.slotNum())) {
           LogEntry existingEntry = logValues.get(p2aPVal.slotNum());
           // only check if we still have the entry (might be mid-GC)
-          if (existingEntry != null && existingEntry.status() == PaxosLogSlotStatus.CHOSEN) {
+          // TODO: the && can be redundant, and can assert that existingEntry != null
+          if (existingEntry != null) {
             assertWithMessage(p2aPVal.amoCommand().equals(existingEntry.amoCommand()),
                           "PaxosServer.handleP2a: Cmd from request is not the same as cmd in slot");
           }
@@ -670,6 +666,7 @@ public class PaxosServer extends Node {
   private void cleanupLeaderLog() {
     if (!isLeader()) { return; }
 
+    // TODO: can call cleanup function
     // remove any entries that have been garbage collected
     this.logValues.entrySet().removeIf(entry -> entry.getKey() <= this.globalMinSlotOut);
 
@@ -862,6 +859,7 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public int lastNonEmpty() {
+    // TODO: slot_nonempty_max should be set to global...
     int slot_nonempty_max = 0;
     for (Integer slot : this.logValues.keySet()) {
       // only consider slots that haven't been cleared

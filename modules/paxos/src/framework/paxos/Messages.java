@@ -1,6 +1,7 @@
 package framework.paxos;
 
 import framework.atmostonce.AMOCommand;
+import framework.Address;
 import framework.Message;
 import framework.paxos.PaxosServer.Ballot;
 import framework.paxos.PaxosServer.LogEntry;
@@ -38,10 +39,10 @@ final class Decision implements Message {
 final class Heartbeat implements Message {
   private final Ballot ballot;
   private final HashMap<Integer, LogEntry> log;
-  private final int globalMinSlotOut;
+  private final HashMap<Address, Integer> serverSlotOuts;
 }
 
 @Data
 final class HeartbeatReply implements Message {
-  private final int slotOut;
+  private final HashMap<Address, Integer> serverSlotOuts;
 }

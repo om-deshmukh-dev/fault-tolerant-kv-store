@@ -38,4 +38,10 @@ final class Decision implements Message {
 final class Heartbeat implements Message {
   private final Ballot ballot;
   private final HashMap<Integer, LogEntry> log;
+  private final int globalMinSlotOut;
+}
+
+@Data
+final class HeartbeatReply implements Message {
+  private final int slotOut;
 }

@@ -147,6 +147,15 @@ public class PaxosServer extends Node {
    *  Message Handlers - Replicas
    * ---------------------------------------------------------------------------------------------*/
   private void handlePaxosRequest(PaxosRequest m, Address sender) {
+    // singleton paxos: a single server does not need to use paxos at all
+    // (the other data structures or timers may be messed up, but it does not matter
+    // since a server does not send to itself nor calls any other message handlers)
+    if (this.servers.length == 1) {
+      AMOResult amoResult = this.amoApplication.execute(m.command());
+      send(new PaxosReply(amoResult), sender);
+      return;
+    }
+
     if (!this.isLeaderElected) {
       // still in leader election, drive progress
       sendAllExceptSelf(new P1a(this.ballotSelf));

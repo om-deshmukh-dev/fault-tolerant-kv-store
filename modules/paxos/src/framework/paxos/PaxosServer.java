@@ -229,6 +229,9 @@ public class PaxosServer extends Node {
       changeBallotOnPreemption(pValDecision.ballot());
     }
 
+    // TODO: the pValDecision ballot might be smaller, but things still work because once a decision
+    // is made, the ballot inside the decision is arbitrary.
+
     switch (status(pValDecision.slotNum())) {
       case EMPTY, ACCEPTED:
         setChosenAndExecPrefix(pValDecision);
@@ -441,6 +444,7 @@ public class PaxosServer extends Node {
   // Get the log status of the slot that holds the amoCommand in the request.
   // It is assumed that at most one log slot will contain the command in the request.
   private PaxosLogSlotStatus getReqLogStatus(PaxosRequest request) {
+    // TODO: this assumes that the request has not been executed before
     int reqLogSlot = getReqLogSlot(request);
     return (reqLogSlot == LOG_UNKNOWN) ? PaxosLogSlotStatus.EMPTY : status(reqLogSlot);
   }
@@ -512,6 +516,7 @@ public class PaxosServer extends Node {
       return entryExternal;
     }
 
+    // TODO: do not need to check the ballot in chosen slots (same as in handleDecision)
     if (entryInternal.status() == PaxosLogSlotStatus.CHOSEN) {
       return entryInternal;
     } else if (entryExternal.status() == PaxosLogSlotStatus.CHOSEN) {
@@ -607,6 +612,7 @@ public class PaxosServer extends Node {
   // up to the new global min
   private void mergeSlotOuts(HashMap<Address, Integer> serverSlotOutsExternal) {
     for (Address server : servers) {
+      // TODO: can make getting our own slot out a call to getOurSlotOut()
       int slotOutMax = Math.max(this.serverSlotOuts.get(server), serverSlotOutsExternal.get(server));
       this.serverSlotOuts.put(server, slotOutMax);
     }
@@ -618,6 +624,10 @@ public class PaxosServer extends Node {
   // Returns whether this server is the leader, i.e. thinks a
   // leader is elected and is part of the highest ballot seen
   private boolean isLeader() {
+    // TODO: checking the address here (instead of ballotSelf) is fine
+    // because if "we" (this server) elect our self as leader, there should not be
+    // two different sequence numbers in ballotHighestSeen and ballotSelf (they are
+    // set equal on leader election)
     return this.isLeaderElected && this.ballotHighestSeen.address.equals(this.address());
   }
   // Returns whether this server thinks another server is elected.

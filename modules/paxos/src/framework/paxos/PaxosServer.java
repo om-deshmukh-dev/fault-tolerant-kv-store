@@ -386,16 +386,14 @@ public class PaxosServer extends Node {
         break;
       case CHOSEN:
         // TODO: can assert that the slot number must still be in the log
-        // verify command matches what we have if entry still exists
-        if (logValues.containsKey(p2aPVal.slotNum())) {
-          LogEntry existingEntry = logValues.get(p2aPVal.slotNum());
-          // only check if we still have the entry (might be mid-GC)
-          // TODO: the && can be redundant, and can assert that existingEntry != null
-          if (existingEntry != null) {
-            assertWithMessage(p2aPVal.amoCommand().equals(existingEntry.amoCommand()),
-                          "PaxosServer.handleP2a: Cmd from request is not the same as cmd in slot");
-          }
-        }
+        assertWithMessage(this.logValues.containsKey(p2aPVal.slotNum()),
+                        "PaxosServer.handleP2a: slot " + p2aPVal.slotNum() + " is CHOSEN but not in log");
+
+        LogEntry existingEntry = logValues.get(p2aPVal.slotNum());
+        // only check if we still have the entry (might be mid-GC)
+        assertWithMessage(p2aPVal.amoCommand().equals(existingEntry.amoCommand()),
+            "PaxosServer.handleP2a: Cmd from request is not the same as cmd in slot");
+
         // do not need to do anything really
         break;
       case CLEARED:
@@ -666,8 +664,10 @@ public class PaxosServer extends Node {
     final int minSlotOut = getSlotOutGlobalMin();
     this.logValues.entrySet().removeIf(entry -> {
 
-      assertWithMessage(entry.getKey() >= minSlotOut || this.amoApplication.alreadyExecuted(entry.getValue().amoCommand()),
-                      "PaxosServer.clearSlotsUpToGlobalMin: entry " + entry + " is being removed but not-executed");
+      if (entry.getKey() < minSlotOut && !isCmdNoOp(entry.getValue().amoCommand())) {
+        assertWithMessage(this.amoApplication.alreadyExecuted(entry.getValue().amoCommand()),
+            "PaxosServer.clearSlotsUpToGlobalMin ("+this.address()+"): entry " + entry + " is being removed but not-executed, SlotGlobalMin=" + minSlotOut);
+      }
       return entry.getKey() < minSlotOut;
     });
   }
@@ -808,13 +808,13 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public PaxosLogSlotStatus status(int logSlotNum) {
-    if (logSlotNum < getSlotOutGlobalMin()) {
-      return PaxosLogSlotStatus.CLEARED;
-    }
-
     for (int slot = LOG_START; slot < getSlotOutGlobalMin(); slot++) {
       assertWithMessage(!this.logValues.containsKey(slot),
-                        "PaxosServer.status: slot " + slot + " before global min " + getSlotOutGlobalMin() + " must be garbage collected. our slot out is " + getOurSlotOut());
+          "PaxosServer.status: slot " + slot + " before global min " + getSlotOutGlobalMin() + " must be garbage collected. our slot out is " + getOurSlotOut());
+    }
+
+    if (logSlotNum < getSlotOutGlobalMin()) {
+      return PaxosLogSlotStatus.CLEARED;
     }
 
     if (this.logValues.containsKey(logSlotNum)) {

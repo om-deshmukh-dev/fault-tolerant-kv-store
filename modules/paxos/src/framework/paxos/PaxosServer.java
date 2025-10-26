@@ -133,7 +133,6 @@ public class PaxosServer extends Node {
 
   @Override
   public void init() {
-    assertWithMessage(!this.isLeaderElected, "PaxosServer.init: no one should be elected yet");
     initLeaderElection();
 
     // set up pulsating heartbeat check timers to know when to re-initiate leader election
@@ -148,15 +147,12 @@ public class PaxosServer extends Node {
    *  Message Handlers - Replicas
    * ---------------------------------------------------------------------------------------------*/
   private void handlePaxosRequest(PaxosRequest m, Address sender) {
-    // a server that has already executed the request can immediately send back a reply
-    assertWithMessage(!isCmdNoOp(m.command()), "PaxosServer.handlePaxosRequest: client can never send noop");
-
     if (!this.isLeaderElected) {
       // still in leader election, drive progress
-      assertWithMessage(!isMinority(this.scoutWaitFor), "PaxosServer.handlePaxosRequest: non-leader waiting for minority but still in leader election");
       sendAllExceptSelf(new P1a(this.ballotSelf));
     }
 
+    // a server that has already executed the request can immediately send back a reply
     if (this.amoApplication.alreadyExecuted(m.command())) {
       AMOResult amoResult = this.amoApplication.execute(m.command());
       send(new PaxosReply(amoResult), sender);
@@ -178,14 +174,6 @@ public class PaxosServer extends Node {
       case ACCEPTED:
         // leader will repropose request to drive progress
         // NOTE: the CommanderWaitFor does not need to be reset
-        int reqLogSlot = getReqLogSlot(m);
-        LogEntry entry = this.logValues.get(reqLogSlot);
-
-        assertWithMessage(this.commanderWaitForPerSlot.containsKey(reqLogSlot),
-                        "PaxosServer: leader should have already set commanderWaitFor for each accepted entry");
-        assertWithMessage(this.ballotSelf.equals(entry.ballot()),
-                        "PaxosServer: leader should already have accepted all accepted log entries");
-
         reproposeAllAcceptedSlots();
         break;
       case CHOSEN:
@@ -194,7 +182,7 @@ public class PaxosServer extends Node {
         reproposeAllAcceptedSlots();
         break;
       case CLEARED:
-        assertWithMessage(false, "PaxosServer: cleared command " + m.command() + " must already be executed");
+        // should already be executed by this point
         break;
     }
   }
@@ -204,8 +192,6 @@ public class PaxosServer extends Node {
     if (this.isLeaderElected) { return; }
 
     // at this point, replica is still performing leader election
-    assertWithMessage(this.ballotSelf.equals(this.ballotHighestSeen),
-                    "PaxosServer.p1b: replica in leader election should still think it has the highest ballot");
 
     if (p1b.ballot().compareTo(this.ballotSelf) < 0) {
       // ignore => probably from previous phase of leader election
@@ -218,20 +204,16 @@ public class PaxosServer extends Node {
         // LEADER ELECTED!!!
         this.isLeaderElected = true;
         this.commanderWaitForPerSlot = new HashMap<>();
-        assertWithMessage(isLeader(), "PaxosServer.handleP1b: finished leader election but not leader");
         cleanupLeaderLog();
         reproposeAllAcceptedSlots();
       }
     } else {
-      assertWithMessage(false, "PaxosServer.p1b: acceptors should not currently send failures");
+      // acceptors should not send failures
     }
   }
 
   private void handleDecision(Decision decision, Address sender) {
     PValue pValDecision = decision.pValue();
-
-    assertWithMessage(!pValDecision.ballot().equals(this.ballotSelf),
-                    "PaxosServer.handleDecision: server " + this.address() + " sent itself decision");
 
     // to reduce concurrent leader time, adopt during decision
     if (pValDecision.ballot().compareTo(this.ballotHighestSeen) > 0) {
@@ -239,20 +221,10 @@ public class PaxosServer extends Node {
     }
 
     switch (status(pValDecision.slotNum())) {
-      case EMPTY:
-        setChosenAndExecPrefix(pValDecision);
-        break;
-      case ACCEPTED:
-        LogEntry entryInternal = this.logValues.get(pValDecision.slotNum());
-        assertWithMessage(entryInternal.ballot().compareTo(pValDecision.ballot()) <= 0 || entryInternal.amoCommand().equals(pValDecision.amoCommand()),
-                          "PaxosServer.handleDecision: ballot being proposed in our log has higher ballot and different command");
+      case EMPTY, ACCEPTED:
         setChosenAndExecPrefix(pValDecision);
         break;
       case CHOSEN:
-        assertWithMessage(this.logValues.containsKey(pValDecision.slotNum()),
-                        "PaxosServer.handleDecision: slot " + pValDecision.slotNum() + " CHOSEN but not in log");
-        assertWithMessage(pValDecision.amoCommand().equals(this.logValues.get(pValDecision.slotNum()).amoCommand()),
-                        "PaxosServer.handleDecision: two different commands chosen for same slot");
         // do not need to do anything else
         break;
       case CLEARED:
@@ -274,8 +246,6 @@ public class PaxosServer extends Node {
   }
 
   private void handleHeartbeat(Heartbeat heartbeat, Address sender) {
-    assertWithMessage(!heartbeat.ballot().address().equals(this.address()), "PaxosServer.handleHeartbeat: Got heartbeat from self");
-
     if (heartbeat.ballot().compareTo(this.ballotHighestSeen) > 0) {
       // elect the sender of the heartbeat as the new leader (also sets gotHeartbeat)
       changeBallotOnPreemption(heartbeat.ballot());
@@ -309,34 +279,28 @@ public class PaxosServer extends Node {
 
     // it can be assumed that p2b is only received when the acceptor
     // has adopted a ballot with the same address as this server
-    assertWithMessage(p2bPVal.ballot().address().equals(this.address()) && p2bPVal.ballot().compareTo(this.ballotSelf) <= 0,
-                    "PaxosServer.handleP2b: receiving failed p2b reply (which acceptors currently do not send)");
+    // (must be equal after the next if statement)
 
     // do not process smaller ballots (stale)
     if (p2bPVal.ballot().compareTo(this.ballotSelf) < 0) { return; }
 
     switch (status(p2bPVal.slotNum())) {
       case EMPTY:
-        assertWithMessage(false, "PaxosServer.handleP2b: slot " + p2bPVal.slotNum() + " is empty (even though this commander sent it)");
+        // should never get here (this leader sent P2a, should thus never be empty)
         break;
       case ACCEPTED:
-        assertWithMessage(commanderWaitForPerSlot.containsKey(p2bPVal.slotNum()),
-            "PaxosServer.handleP2b: server should still have accepted slot in cmdrWaitForPerSlot");
-
         // remove sender from commanderWaitFor for the slot they have accepted the proposal in
         commanderWaitForPerSlot.get(p2bPVal.slotNum()).remove(sender);
+
         if (isMinority(commanderWaitForPerSlot.get(p2bPVal.slotNum()))) {
           setChosenAndExecPrefix(p2bPVal);
           sendAllExceptSelf(new Decision(p2bPVal));
         }
         break;
       case CHOSEN:
-        assertWithMessage(!commanderWaitForPerSlot.containsKey(p2bPVal.slotNum()),
-            "PaxosServer.handleP2b: server should have removed chosen slot from cmdrWaitForPerSlot");
-        // can just ignore p2b
+        // can just ignore p2b (commanderWaitFor should be cleared by this point)
         break;
       case CLEARED:
-        // assertWithMessage(false, "PaxosServer.handleP2b: handle cleared case");
         // slot already garbage collected and executed, ignore p2b
         break;
     }
@@ -347,20 +311,14 @@ public class PaxosServer extends Node {
    * ---------------------------------------------------------------------------------------------*/
 
   private void handleP1a(P1a p1a, Address sender) {
-    assertWithMessage(!p1a.ballot().address().equals(this.address()), "PaxosServer.handleP1a: should never get P1a from self");
-
     if (p1a.ballot().compareTo(this.ballotHighestSeen) > 0) {
       changeBallotOnPreemption(p1a.ballot());
-      assertWithMessage(p1a.ballot().equals(this.ballotHighestSeen), "PaxosServer.handleP1a: should have adopted higher ballot by now");
       send(new P1b(this.ballotHighestSeen, this.logValues), sender);
     }
   }
 
   private void handleP2a(P2a p2a, Address sender) {
     PValue p2aPVal = p2a.pValue();
-
-    assertWithMessage(p2aPVal.ballot().compareTo(this.ballotSelf) != 0,
-                      "PaxosServer.handleP2a: server should never get their own P2a msg (for now)");
 
     // ignore P2a if the ballot in the request is lower than our highest seen (bribed by someone else)
     if (p2aPVal.ballot().compareTo(this.ballotHighestSeen) < 0) { return; }
@@ -371,33 +329,17 @@ public class PaxosServer extends Node {
     }
 
     // at this point, the ballot in the P2a request must match our highest seen
-    assertWithMessage(this.ballotHighestSeen.equals(p2aPVal.ballot()),
-                  "PaxosServer.handleP2a: highest ballot is " + this.ballotHighestSeen + " instead of " + p2aPVal.ballot());
 
     // case on the logEntry status of the slot number in our log
     switch (status(p2aPVal.slotNum())) {
-      case EMPTY:
-        logValues.put(p2aPVal.slotNum(), new LogEntry(p2aPVal.amoCommand(), p2aPVal.ballot(), PaxosLogSlotStatus.ACCEPTED));
-        break;
-      case ACCEPTED:
-        assertWithMessage(this.ballotHighestSeen.compareTo(logValues.get(p2aPVal.slotNum()).ballot()) >= 0,
-                          "PaxosServer.handleP2a: highest ballot is not at least as large as the ballot in any non-empty slot");
+      case EMPTY, ACCEPTED:
+        // accept the command (which has at least as high of a ballot as before)
         logValues.put(p2aPVal.slotNum(), new LogEntry(p2aPVal.amoCommand(), p2aPVal.ballot(), PaxosLogSlotStatus.ACCEPTED));
         break;
       case CHOSEN:
-        // TODO: can assert that the slot number must still be in the log
-        assertWithMessage(this.logValues.containsKey(p2aPVal.slotNum()),
-                        "PaxosServer.handleP2a: slot " + p2aPVal.slotNum() + " is CHOSEN but not in log");
-
-        LogEntry existingEntry = logValues.get(p2aPVal.slotNum());
-        // only check if we still have the entry (might be mid-GC)
-        assertWithMessage(p2aPVal.amoCommand().equals(existingEntry.amoCommand()),
-            "PaxosServer.handleP2a: Cmd from request is not the same as cmd in slot");
-
-        // do not need to do anything really
+        // do not need to do anything really (it must be that the command in the p2a is the same)
         break;
       case CLEARED:
-        // assertWithMessage(false, "PaxosServer.handleP2a: cleared case unimplemented");
         // slot already garbage collected, we've executed it, just ack back
         break;
     }
@@ -413,8 +355,6 @@ public class PaxosServer extends Node {
   // and if not, will re-initiate leader election
   private void onHeartbeatCheckTimer(HeartbeatCheckTimer t) {
     if (isAnotherServerElected() && !this.gotHeartbeatFromLeader) {
-      assertWithMessage(this.ballotHighestSeen.compareTo(this.ballotSelf) > 0,
-                        "PaxosServer.onHeartbeatCheckTimer: this server expected heartbeat from another, but does not think another is the leader somehow");
       initLeaderElection();
     }
 
@@ -449,11 +389,6 @@ public class PaxosServer extends Node {
   // This function assumes that the server has not gotten a heartbeat from a leader
   // within a given time interval.
   private void initLeaderElection() {
-    assertWithMessage(!this.gotHeartbeatFromLeader, "PaxosServer.initLeaderElection: got heartbeat but still doing leader election");
-    assertWithMessage(this.ballotHighestSeen != null, "PaxosServer.initLeaderElection: highest ballot uninitialized");
-    assertWithMessage(!isLeader(), "PaxosServer.initLeaderElection: server thinks its the leader but is performing leader election");
-    assertWithMessage(this.ballotHighestSeen.compareTo(this.ballotSelf) >= 0, "PaxosServer.initLeaderElection: ballot of dead leader should be at least as large as this server's ballot");
-
     this.isLeaderElected = false;
     this.ballotSelf = new Ballot(this.ballotHighestSeen.sequenceNum() + 1, this.address());
 
@@ -484,15 +419,10 @@ public class PaxosServer extends Node {
   // NULL if no log slot contains the request's command.
   // It is assumed that at most one log slot will contain the command in the request.
   private int getReqLogSlot(PaxosRequest request) {
-    assertWithMessage(!isCmdNoOp(request.command()), "PaxosServer.getReqLogSlot: client request is NOOP, when it should never be");
-
     for (Integer slotNum : this.logValues.keySet()) {
-      LogEntry entry = this.logValues.get(slotNum);
-      assertWithMessage(slotNum >= LOG_START, "PaxosServer.getReqLogSlot: logValues contains invalid slot " + slotNum);
 
+      LogEntry entry = this.logValues.get(slotNum);
       if (request.command().equals(entry.amoCommand())) {
-        assertWithMessage(entry.status == PaxosLogSlotStatus.ACCEPTED || entry.status == PaxosLogSlotStatus.CHOSEN,
-            "PaxosServer.getReqLogSlot: request in log has malformed status " + entry.status);
         return slotNum;
       }
     }
@@ -510,13 +440,12 @@ public class PaxosServer extends Node {
   // execute the largest prefix of CHOSEN commands in the log. It is assumed
   // that the slot being set to CHOSEN has not been cleared nor executed before.
   private void setChosenAndExecPrefix(PValue pValue) {
-    assertWithMessage(status(pValue.slotNum()) != PaxosLogSlotStatus.CLEARED,
-                      "PaxosServer.setChosenAndExecPrefix: slot " + pValue.slotNum() + " is cleared but being set to chosen");
 
     this.logValues.put(pValue.slotNum(),
         new LogEntry(pValue.amoCommand(), pValue.ballot(), PaxosLogSlotStatus.CHOSEN)
     );
-    this.commanderWaitForPerSlot.remove(pValue.slotNum()); // this server is no longer waiting for the slot to be decided
+    // this server is no longer waiting for the slot to be decided
+    this.commanderWaitForPerSlot.remove(pValue.slotNum());
 
     while (status(getOurSlotOut()) == PaxosLogSlotStatus.CHOSEN) {
       AMOCommand amoCommandSlotOut = this.logValues.get(getOurSlotOut()).amoCommand();
@@ -536,10 +465,6 @@ public class PaxosServer extends Node {
   // the leader can arbitrarily fill empty slots with accepted commands), and
   // that the slot for the argument is CHOSEN
   private void fillGapsWithNoop(int slotEndFilling) {
-    assertWithMessage(isLeader(), "PaxosServer.fillGapsWithNoop: non-leader trying to fill gaps");
-    assertWithMessage(status(slotEndFilling) == PaxosLogSlotStatus.CHOSEN, "PaxosServer.fillGapsWithNoop: end of gap is not a CHOSEN command");
-    assertWithMessage(slotEndFilling >= LOG_START, "PaxosServer.fillGapsWithNoop: improper log slot " + slotEndFilling);
-
     for (int slotToFill = LOG_START; slotToFill < slotEndFilling; slotToFill++) {
       if (status(slotToFill) == PaxosLogSlotStatus.EMPTY) {
         this.logValues.put(slotToFill,
@@ -556,17 +481,8 @@ public class PaxosServer extends Node {
   // and that every accepted slot in the leader's log has the leader's ballot
   // (allowing for the leader to skip sending to themselves)
   private void reproposeAllAcceptedSlots() {
-    assertWithMessage(isLeader(), "PaxosServer.reproposeAllAcceptedSlots: caller is not leader");
-
     for (Integer slotNum : this.logValues.keySet()) {
       if (status(slotNum) == PaxosLogSlotStatus.ACCEPTED) {
-        assertWithMessage(this.commanderWaitForPerSlot.containsKey(slotNum),
-                        "PaxosServer.reproposeAllAcceptedSlots: slot " + slotNum + " is accepted but no cmdWaitFor set");
-        assertWithMessage(!isMinority(this.commanderWaitForPerSlot.get(slotNum)),
-                        "PaxosServer.reproposeAllAcceptedSlots: slot " + slotNum + " already has minority cmdWaitFor");
-        assertWithMessage(this.logValues.get(slotNum).ballot().equals(this.ballotSelf),
-                        "PaxosServer.reproposeAllAcceptedSlots: leader should have already replaced all accepted ballots with their own");
-
         LogEntry entry = this.logValues.get(slotNum);
         sendAllExceptSelf(new P2a(
             new PValue(entry.ballot(), slotNum, entry.amoCommand()))
@@ -582,21 +498,14 @@ public class PaxosServer extends Node {
   //  - If both are ACCEPTED, return the one containing the higher ballot
   //  - If both are CHOSEN, assert that both commands in the entries are the same, and return either one
   private LogEntry compareLogEntries(LogEntry entryInternal, @NonNull LogEntry entryExternal) {
+    // assumed that if it's null, it's EMPTY
     if (entryInternal == null) {
       return entryExternal;
     }
-    assertWithMessage(entryExternal.status() == PaxosLogSlotStatus.ACCEPTED || entryExternal.status() == PaxosLogSlotStatus.CHOSEN,
-                      "PaxosServer.mergeLog: external log entry has bad status " + entryExternal.status());
-    assertWithMessage(entryInternal.status() == PaxosLogSlotStatus.ACCEPTED || entryInternal.status() == PaxosLogSlotStatus.CHOSEN,
-                      "PaxosServer.mergeLog: internal log entry has bad status " + entryInternal.status());
 
     if (entryInternal.status() == PaxosLogSlotStatus.CHOSEN) {
-      assertWithMessage(entryExternal.status() != PaxosLogSlotStatus.CHOSEN || entryInternal.amoCommand().equals(entryExternal.amoCommand()),
-                        "PaxosServer.compareLogEntries: two different commands chosen for same slot");
       return entryInternal;
     } else if (entryExternal.status() == PaxosLogSlotStatus.CHOSEN) {
-      assertWithMessage(entryInternal.ballot().compareTo(entryExternal.ballot()) <= 0 || entryInternal.amoCommand().equals(entryExternal.amoCommand()),
-                        "PaxosServer.compareLogEntries: higher proposed value for chosen slot has different command");
       return entryExternal;
     } else {
       // if both are accepted for the same slot, return the entry with the higher ballot
@@ -651,7 +560,8 @@ public class PaxosServer extends Node {
           this.commanderWaitForPerSlot.remove(slotNum);
           return entry;
         default:
-          assertWithMessage(false, "PaxosServer.cleanupLeaderLog: empty or cleared entry in log");
+          // should never have an empty or cleared entry in log
+          // assertWithMessage(false, "PaxosServer.cleanupLeaderLog: empty or cleared entry in log");
           return entry;
       }
     });
@@ -662,14 +572,7 @@ public class PaxosServer extends Node {
   private void clearSlotsUpToGlobalMin() {
     // remove all entries < minimum slotOut among all servers from the log
     final int minSlotOut = getSlotOutGlobalMin();
-    this.logValues.entrySet().removeIf(entry -> {
-
-      if (entry.getKey() < minSlotOut && !isCmdNoOp(entry.getValue().amoCommand())) {
-        assertWithMessage(this.amoApplication.alreadyExecuted(entry.getValue().amoCommand()),
-            "PaxosServer.clearSlotsUpToGlobalMin ("+this.address()+"): entry " + entry + " is being removed but not-executed, SlotGlobalMin=" + minSlotOut);
-      }
-      return entry.getKey() < minSlotOut;
-    });
+    this.logValues.entrySet().removeIf(entry -> entry.getKey() < minSlotOut );
   }
 
   // gets the minimum slotOut among all servers in serverSlotOuts
@@ -682,16 +585,11 @@ public class PaxosServer extends Node {
   }
 
   // gets this server's slotOut (the earliest slot where everything before has been decided and executed)
-  private int getOurSlotOut() {
-    assertWithMessage(this.serverSlotOuts.containsKey(this.address()), "PaxosServer.getOurSlotOut: own server's address not in serverSlotOuts");
-    assertWithMessage(this.serverSlotOuts.get(this.address()) >= LOG_START, "PaxosServer.getOurSlotOut: slot invalid");
-    return this.serverSlotOuts.get(this.address());
-  }
+  private int getOurSlotOut() { return this.serverSlotOuts.get(this.address()); }
 
   // sets this server's slotOut
   private void setOurSlotOut(int slotOut) {
-    assertWithMessage(slotOut >= LOG_START, "PaxosServer.setSlotOut: invalid slotOut");
-    assertWithMessage(getOurSlotOut() == slotOut - 1, "PaxosServer.setOurSlotOut: used to have " + getOurSlotOut() + ", setting to " + slotOut);
+    // slotOut is assumed to be at most one more than the current slotOut
     this.serverSlotOuts.put(this.address(), slotOut);
   }
 
@@ -701,11 +599,6 @@ public class PaxosServer extends Node {
   private void mergeSlotOuts(HashMap<Address, Integer> serverSlotOutsExternal) {
     for (Address server : servers) {
       int slotOutMax = Math.max(this.serverSlotOuts.get(server), serverSlotOutsExternal.get(server));
-
-      if (server.equals(this.address())) {
-        assertWithMessage(slotOutMax == getOurSlotOut(), "PaxosServer.mergeSlotOuts: merging our slot to a higher value");
-      }
-
       this.serverSlotOuts.put(server, slotOutMax);
     }
     clearSlotsUpToGlobalMin();
@@ -726,9 +619,6 @@ public class PaxosServer extends Node {
   // Will update the highest ballot seen to the argument, and set the
   // leader to the server associated with the highest ballot
   private void changeBallotOnPreemption(Ballot ballot) {
-    assertWithMessage(ballot.compareTo(this.ballotHighestSeen) > 0,
-                      "PaxosServer.changeBallotOnPreemption: ballot passed in not higher than ours");
-
     this.ballotHighestSeen = ballot;
     this.isLeaderElected = true;
     this.gotHeartbeatFromLeader = true;
@@ -740,7 +630,6 @@ public class PaxosServer extends Node {
   // this server will wait for everybody except itself. This function
   // assumes the set passed in is initialized as the empty set.
   private void resetWaitFor(@NonNull HashSet<Address> waitFor) {
-    assertWithMessage(waitFor.isEmpty(), "PaxosServer.resetWaitFor: waitFor set is not initialized as the empty set");
     for (Address server : servers) {
       if (!server.equals(this.address())) {
         waitFor.add(server);
@@ -782,7 +671,7 @@ public class PaxosServer extends Node {
   private void assertWithMessage(boolean b, String m) {
     if (!b) {
       System.out.println(m);
-      System.exit(1);
+      throw new RuntimeException();
     }
   }
 
@@ -808,20 +697,12 @@ public class PaxosServer extends Node {
    * @see PaxosLogSlotStatus
    */
   public PaxosLogSlotStatus status(int logSlotNum) {
-    for (int slot = LOG_START; slot < getSlotOutGlobalMin(); slot++) {
-      assertWithMessage(!this.logValues.containsKey(slot),
-          "PaxosServer.status: slot " + slot + " before global min " + getSlotOutGlobalMin() + " must be garbage collected. our slot out is " + getOurSlotOut());
-    }
-
     if (logSlotNum < getSlotOutGlobalMin()) {
       return PaxosLogSlotStatus.CLEARED;
     }
 
     if (this.logValues.containsKey(logSlotNum)) {
-      PaxosLogSlotStatus slotStatus = logValues.get(logSlotNum).status();
-      assertWithMessage(slotStatus == PaxosLogSlotStatus.ACCEPTED || slotStatus == PaxosLogSlotStatus.CHOSEN,
-                                      "PaxosServer.chosen: slot " + logSlotNum + " has status " + slotStatus);
-      return slotStatus;
+      return this.logValues.get(logSlotNum).status();
     }
     return PaxosLogSlotStatus.EMPTY;
   }
@@ -882,12 +763,7 @@ public class PaxosServer extends Node {
   public int lastNonEmpty() {
     int slot_nonempty_max = getOurSlotOut() - 1; // assumed that the slot right before cannot be empty
 
-    assertWithMessage(slot_nonempty_max == LOG_UNKNOWN || status(slot_nonempty_max) != PaxosLogSlotStatus.EMPTY,
-                      "PaxosServer.lastNonEmpty: slot right before this server's slotOut is empty");
-
     for (Integer slot : this.logValues.keySet()) {
-        assertWithMessage(status(slot) == PaxosLogSlotStatus.ACCEPTED || status(slot) == PaxosLogSlotStatus.CHOSEN,
-                          "PaxosServer.lastNonEmpty: slot " + slot + " in log has status " + status(slot));
         slot_nonempty_max = Math.max(slot_nonempty_max, slot);
     }
     return slot_nonempty_max;

@@ -78,7 +78,6 @@ public final class ShardMaster implements Application {
 
   @Override
   public Result execute(Command command) {
-    System.out.println("Current Config: " + this.config);
     if (command instanceof Join join) {
       return handleJoin(join.groupId, join.servers);
     }
@@ -89,14 +88,12 @@ public final class ShardMaster implements Application {
       // Your code here...
     }
 
-    if (command instanceof Move) {
-      Move move = (Move) command;
-
-      // Your code here...
+    if (command instanceof Move move) {
+      return handleMove(move.groupId(), move.shardNum());
     }
 
     if (command instanceof Query query) {
-      return handleQuery(query);
+      return handleQuery(query.configNum());
     }
 
     throw new IllegalArgumentException();
@@ -105,18 +102,53 @@ public final class ShardMaster implements Application {
   /**
    * Query Handler:
    */
-  private Result handleQuery(Query query) {
+  private Result handleQuery(int configNumQuery) {
     if (this.config.isEmpty()) {
       return new Error();
     }
-    else if (this.config.containsKey(query.configNum)) {
-      return new ShardConfig(query.configNum, this.config.get(query.configNum));
+    else if (this.config.containsKey(configNumQuery)) {
+      return new ShardConfig(configNumQuery, this.config.get(configNumQuery));
     }
     else {
       int configNumLatest = getLatestConfigNum();
       assertWithThrow(configNumLatest != INVALID_CONFIG_NUM && this.config.containsKey(configNumLatest));
       return new ShardConfig(configNumLatest, this.config.get(configNumLatest));
     }
+  }
+
+  /**
+   * Move Handler:
+   */
+  private Result handleMove(int groupId, int shardNum) {
+    if (this.config.isEmpty()) { return new Error(); }
+
+    int configNumBeforeCopy = getLatestConfigNum();
+    Map<Integer, Pair<Set<Address>, Set<Integer>>> groupInfoBeforeCopy = this.config.get(configNumBeforeCopy);
+
+    // group not yet joined, or already managing shard
+    if (!groupInfoBeforeCopy.containsKey(groupId)) {
+      return new Error();
+    } if (groupInfoBeforeCopy.get(groupId).getRight().contains(shardNum)) {
+      return new Error();
+    }
+
+    // some other group must be managing shard, find them and move to this group
+    int configNumAfterCopy = deepCopyToNewConfig();
+    Map<Integer, Pair<Set<Address>, Set<Integer>>> groupInfoAfterCopy = this.config.get(configNumAfterCopy);
+
+    for (Integer groupIdIter : groupInfoAfterCopy.keySet()) {
+      if (groupInfoAfterCopy.get(groupIdIter).getRight().contains(shardNum)) {
+        moveShard(
+            groupInfoAfterCopy.get(groupIdIter).getRight(),
+            groupInfoAfterCopy.get(groupId).getRight()
+        );
+        return new Ok();
+      }
+    }
+
+    // should never get here (that means no one is managing shard)
+    assertWithThrow(false);
+    return new Error();
   }
 
   /**

@@ -212,6 +212,8 @@ public class PaxosServer extends Node {
       if (isMinority(this.scoutWaitFor)) {
         // LEADER ELECTED!!!
         this.isLeaderElected = true;
+
+        // TODO: the only reason `cleanupLeaderLog()` does not break is because of this line
         this.commanderWaitForPerSlot = new HashMap<>();
         cleanupLeaderLog();
         reproposeAllAcceptedSlots();

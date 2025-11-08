@@ -82,10 +82,8 @@ public final class ShardMaster implements Application {
       return handleJoin(join.groupId, join.servers);
     }
 
-    if (command instanceof Leave) {
-      Leave leave = (Leave) command;
-
-      // Your code here...
+    if (command instanceof Leave leave) {
+      return handleLeave(leave.groupId());
     }
 
     if (command instanceof Move move) {
@@ -121,6 +119,7 @@ public final class ShardMaster implements Application {
    */
   private Result handleMove(int groupId, int shardNum) {
     if (this.config.isEmpty()) { return new Error(); }
+    if (shardNum <= 0 || shardNum > this.numShards) { return new Error(); }
 
     int configNumBeforeCopy = getLatestConfigNum();
     Map<Integer, Pair<Set<Address>, Set<Integer>>> groupInfoBeforeCopy = this.config.get(configNumBeforeCopy);
@@ -147,8 +146,7 @@ public final class ShardMaster implements Application {
     }
 
     // should never get here (that means no one is managing shard)
-    assertWithThrow(false);
-    return new Error();
+    throw new IllegalArgumentException();
   }
 
   /**
@@ -182,10 +180,44 @@ public final class ShardMaster implements Application {
   }
 
   /**
+   * Leave Handler:
+   */
+  private Result handleLeave(int groupId) {
+    if (this.config.isEmpty()) { return new Error(); }
+
+    int configNumBeforeCopy = getLatestConfigNum();
+    Map<Integer, Pair<Set<Address>, Set<Integer>>> groupInfoBeforeCopy = this.config.get(configNumBeforeCopy);
+
+    if (!groupInfoBeforeCopy.containsKey(groupId) || groupInfoBeforeCopy.size() == 1) {
+      return new Error();
+    }
+
+    int configNumAfterCopy = deepCopyToNewConfig();
+    Map<Integer, Pair<Set<Address>, Set<Integer>>> groupInfoAfterCopy = this.config.get(configNumAfterCopy);
+    assertWithThrow(groupInfoAfterCopy.containsKey(groupId));
+
+    // remove group from latest configuration, and redistribute their shards
+    Set<Integer> shardsGroupLeft = groupInfoAfterCopy.get(groupId).getRight();
+    groupInfoAfterCopy.remove(groupId);
+
+    // find the most starved group for each shard, and give it to them
+    for (Integer shard : shardsGroupLeft) {
+      int groupIdMinShards = getGroupMinShards();
+      Set<Integer> shardsGroupMin = groupInfoAfterCopy.get(groupIdMinShards).getRight();
+
+      assertWithThrow(shardsGroupMin.size() < maxPermissibleShardsInGroup());
+      assertWithThrow(!shardsGroupMin.contains(shard));
+
+      shardsGroupMin.add(shard);
+    }
+
+    doTheRebalance();
+    return new Ok();
+  }
+
+  /**
    * Helpers:
    */
-
-
   // Rebalance the shards in the latest configuration among all the groups, so that every group
   // is within one shard of every other group.
   // It is assumed that the configuration is not empty, and that the latest configuration has
@@ -218,8 +250,22 @@ public final class ShardMaster implements Application {
   private int getGroupMinShards() {
     assertWithThrow(getLatestConfigNum() >= INITIAL_CONFIG_NUM);
     assertWithThrow(!this.config.get(getLatestConfigNum()).isEmpty());
-    assertWithThrow(false);
-    return 0;
+
+    Map<Integer, Pair<Set<Address>, Set<Integer>>> groupInfoLatest = this.config.get(getLatestConfigNum());
+    int groupIdMinSeen = -1;
+    int sizeShardsMinSeen = this.numShards + 1;
+
+    for (Integer groupIdIter : groupInfoLatest.keySet()) {
+      int sizeShardsGroupIter = groupInfoLatest.get(groupIdIter).getRight().size();
+
+      if (sizeShardsGroupIter < sizeShardsMinSeen) {
+        sizeShardsMinSeen = sizeShardsGroupIter;
+        groupIdMinSeen = groupIdIter;
+      }
+    }
+
+    assertWithThrow(groupIdMinSeen >= 0);
+    return groupIdMinSeen;
   }
 
   // find and return the group with the greatest number of shards.

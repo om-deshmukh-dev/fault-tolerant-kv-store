@@ -20,6 +20,7 @@ import lombok.ToString;
 @EqualsAndHashCode(callSuper = true)
 public class PaxosServer extends Node {
   /** All servers in the Paxos group, including this one. */
+  private final Address parentAddress;
   private final Address[] servers;
   private final AMOApplication<Application> amoApplication;
 
@@ -87,7 +88,7 @@ public class PaxosServer extends Node {
   //  - Acceptor State: Track the value accepted for each slot with the highest ballot number.
   //                    This enables the acceptor (in conjunction with the replicas) to achieve
   //                    invariant A4/5 (once majority accepts, can’t overwrite).
-  private final HashMap<Integer, LogEntry> logValues;
+  private HashMap<Integer, LogEntry> logValues;
 
   // Replica (acting as a scout) uses this during leader election (P1) to wait for
   // a majority of acceptors to adopt their ballot
@@ -106,17 +107,27 @@ public class PaxosServer extends Node {
   public PaxosServer(Address address, Address[] servers, Application app) {
     super(address);
     this.servers = servers;
+    this.parentAddress = null;
 
     this.amoApplication = new AMOApplication<>(app, new HashMap<>());
+    constructPaxosDataStructures();
+  }
 
-    /**
-     * constructing PAXOS data structures:
-     */
-    this.ballotSelf = new Ballot(0, address);
+  public PaxosServer(Address address, Address[] servers, Address parentAddress) {
+    super(address); // 'address' is the address of this node
+    this.servers = servers;
+    this.parentAddress = parentAddress;
+
+    this.amoApplication = null;
+    constructPaxosDataStructures();
+  }
+
+  private void constructPaxosDataStructures() {
+    this.ballotSelf = new Ballot(0, this.address());
 
     // no one is elected yet, perform leader election upon init()
     this.isLeaderElected = false;
-    this.ballotHighestSeen = new Ballot(0, address);
+    this.ballotHighestSeen = new Ballot(0, this.address());
     this.gotHeartbeatFromLeader = false;
 
     this.logValues = new HashMap<>();
@@ -151,6 +162,8 @@ public class PaxosServer extends Node {
     // (the other data structures or timers may be messed up, but it does not matter
     // since a server does not send to itself nor calls any other message handlers)
     if (this.servers.length == 1) {
+      // TODO: handle length == 1 with new SubNode paxos
+      assertWithMessage(false, "PaxosServer.handlePaxosRequest (lab 4): have not handled length == 1");
       AMOResult amoResult = this.amoApplication.execute(m.command());
       send(new PaxosReply(amoResult), sender);
       return;
@@ -164,7 +177,7 @@ public class PaxosServer extends Node {
     }
 
     // a server that has already executed the request can immediately send back a reply
-    if (this.amoApplication.alreadyExecuted(m.command())) {
+    if (isAlreadyExecuted(m.command())) {
       AMOResult amoResult = this.amoApplication.execute(m.command());
       send(new PaxosReply(amoResult), sender);
       return;
@@ -248,19 +261,13 @@ public class PaxosServer extends Node {
         break;
     }
 
-    // TODO: break here if subnode version of Paxos (decisions should only be sent back in order to the ShardStoreServer;
-    // and setChosenAndExecPrefix handles this case)
-
     if (isCmdNoOp(pValDecision.amoCommand())) {
       // do not need to do anything
     }
-    else if (this.amoApplication.alreadyExecuted(pValDecision.amoCommand())) {
+    else if (isAlreadyExecuted(pValDecision.amoCommand())) {
       // can send response back to client
       AMOResult amoResult = this.amoApplication.execute(pValDecision.amoCommand());
       send(new PaxosReply(amoResult), pValDecision.amoCommand().address());
-    }
-    else {
-      // DO NOT DO ANYTHING HERE: non-leaders can receive decisions
     }
   }
 
@@ -401,6 +408,15 @@ public class PaxosServer extends Node {
    *  Utils
    * ---------------------------------------------------------------------------------------------*/
 
+  // paxos version difference helpers:
+
+  // Check if this server has already executed the amoCommand. Any server is allowed to
+  // call this method at any time, as long as the amoCommand is not a No-Op.
+  private boolean isAlreadyExecuted(AMOCommand amoCommand) {
+    assertWithMessage(!isCmdNoOp(amoCommand), "checkAndHandleAlreadyExecuted: called with No-Op");
+    return !isSubnode() && this.amoApplication.alreadyExecuted(amoCommand);
+  }
+
   // leader election helpers:
 
   // initializes the leader election phase by changing this server's state to
@@ -471,8 +487,13 @@ public class PaxosServer extends Node {
       AMOCommand amoCommandSlotOut = this.logValues.get(getOurSlotOut()).amoCommand();
 
       if (!isCmdNoOp(amoCommandSlotOut)) {
-        // IMPORTANT POINT: the same command may be chosen for multiple slots, so it is not the case that things after slotOut are not already executed
-        this.amoApplication.execute(amoCommandSlotOut);
+        if (isSubnode()) {
+          // let the ShardStoreServer handle it
+          handleMessage(new PaxosDecision(getOurSlotOut(), amoCommandSlotOut), this.parentAddress);
+        } else {
+          // IMPORTANT POINT: the same command may be chosen for multiple slots, so it is not the case that things after slotOut are not already executed
+          this.amoApplication.execute(amoCommandSlotOut);
+        }
       }
       setOurSlotOut(getOurSlotOut() + 1);
       clearSlotsUpToGlobalMin();
@@ -640,6 +661,11 @@ public class PaxosServer extends Node {
   // Returns whether this server thinks another server is elected.
   private boolean isAnotherServerElected() {
     return this.isLeaderElected && !this.ballotHighestSeen.address.equals(this.address());
+  }
+
+  // whether this PaxosServer is running as a subnode
+  private boolean isSubnode() {
+    return this.parentAddress != null;
   }
 
   // Will update the highest ballot seen to the argument, and set the

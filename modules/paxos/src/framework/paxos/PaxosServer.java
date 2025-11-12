@@ -156,6 +156,8 @@ public class PaxosServer extends Node {
       return;
     }
 
+    // assertWithMessage(false, "PaxosServer.handlePaxosRequest (lab 4): have not handled length > 1");
+
     if (!this.isLeaderElected) {
       // still in leader election, drive progress
       sendAllExceptSelf(new P1a(this.ballotSelf));
@@ -245,6 +247,9 @@ public class PaxosServer extends Node {
         // slot already garbage collected, we've executed it already, ignore
         break;
     }
+
+    // TODO: break here if subnode version of Paxos (decisions should only be sent back in order to the ShardStoreServer;
+    // and setChosenAndExecPrefix handles this case)
 
     if (isCmdNoOp(pValDecision.amoCommand())) {
       // do not need to do anything

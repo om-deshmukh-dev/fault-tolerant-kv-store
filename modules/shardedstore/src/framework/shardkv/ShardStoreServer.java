@@ -33,7 +33,8 @@ public class ShardStoreServer extends ShardStoreNode {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void handleShardStoreRequest(ShardStoreRequest m, Address sender) {
-    // Your code here...
+    System.out.println("Handling Req=" + m + ", sender=" + sender);
+    assertWithThrow(false);
   }
 
   // Your code here...
@@ -46,5 +47,9 @@ public class ShardStoreServer extends ShardStoreNode {
   /* -----------------------------------------------------------------------------------------------
    *  Utils
    * ---------------------------------------------------------------------------------------------*/
-  // Your code here...
+  private void assertWithThrow(boolean b) {
+    if (!b) {
+      System.exit(1);
+    }
+  }
 }

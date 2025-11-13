@@ -17,6 +17,7 @@ import framework.shardmaster.ShardMaster.Query;
 import framework.shardmaster.ShardMaster.ShardConfig;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
@@ -28,6 +29,7 @@ import lombok.ToString;
 public class ShardStoreServer extends ShardStoreNode {
   private final Address[] group;
   private final int groupId;
+  private final int numTotalShards;
 
   private static final int SEQNUM_DONTCARE = -2;
 
@@ -37,8 +39,8 @@ public class ShardStoreServer extends ShardStoreNode {
   private final HashMap<Integer, AMOApplication<Application>> amoApplicationSharded;
   private ShardConfig shardConfigLatest;
 
-  private final Set<Integer> reconfigMovesNeeded;
-  private final Set<Integer> reconfigAcksNeeded;
+  private final Map<Integer, Set<Integer>> reconfigMovesNeeded;
+  private final Map<Integer, Set<Integer>> reconfigAcksNeeded;
 
   // for debugging
   private int paxosLogSlotHighestSeen;
@@ -54,13 +56,14 @@ public class ShardStoreServer extends ShardStoreNode {
     super(address, shardMasters, numShards);
     this.group = group;
     this.groupId = groupId;
+    this.numTotalShards = numShards;
 
     this.amoApplicationSharded = new HashMap<>();
     this.shardConfigLatest = null;
     this.paxosLogSlotHighestSeen = PaxosServer.LOG_START - 1;
 
-    this.reconfigMovesNeeded = new HashSet<>();
-    this.reconfigAcksNeeded = new HashSet<>();
+    this.reconfigMovesNeeded = new HashMap<>();
+    this.reconfigAcksNeeded = new HashMap<>();
   }
 
   @Override
@@ -185,15 +188,24 @@ public class ShardStoreServer extends ShardStoreNode {
     ShardConfig shardConfigNew = ((NewConfig)amoCommand.command()).shardConfig();
 
     // TODO: may be able to assert that config in decision is at most one higher than current config
-    assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM, "S3.processNewConfig: haven't handled other config numbers yet");
     assertWithThrow(!isReconfigOngoing(), "S3.processNewConfig: handle reconfig case");
 
     if (!isReplicated) {
       // TODO: add assertions here
       handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
-    } else {
-      // replicated new config, assuming INITIAL_CONFIG, take on
-      // new shards if managing them, then take on new config
+      return;
+    }
+
+    if (this.shardConfigLatest != null && shardConfigNew.configNum() <= this.shardConfigLatest.configNum()) {
+      // duplicated decision (already moved on to new config)
+      return;
+    }
+
+    if (this.shardConfigLatest == null) {
+      assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM,
+                      "S3.processNewConfig: config empty but not getting INITIAL_CONFIG");
+
+      // this group manages all the shards, initialize sharded AMO app accordingly
       if (shardConfigNew.groupInfo().containsKey(this.groupId)) {
         assertWithThrow(this.amoApplicationSharded != null && this.amoApplicationSharded.isEmpty(), "S3.processNewConfig: map not init to empty");
 
@@ -203,10 +215,81 @@ public class ShardStoreServer extends ShardStoreNode {
           this.amoApplicationSharded.put(shardNum, new AMOApplication<>(new KVStore(), new HashMap<>()));
         }
       }
-
-      // on NewConfig decision, take on the new configuration
-      this.shardConfigLatest = shardConfigNew;
+    } else {
+      assertWithThrow(shardConfigNew.configNum() == this.shardConfigLatest.configNum() + 1,
+                      "S3.processNewConfig: decision for larger config must be exactly one higher");
+      setupReconfigDS(shardConfigNew);
     }
+
+    // take on the new configuration (which must be higher)
+    this.shardConfigLatest = shardConfigNew;
+  }
+
+  /* -----------------------------------------------------------------------------------------------
+   *  Core Helpers
+   * ---------------------------------------------------------------------------------------------*/
+
+  // Given a new shard configuration, if the shards in this group have changed,
+  // set up the reconfiguration data structures. It is assumed that:
+  //   1. the new shard configuration has a config num exactly one larger than current config
+  //      (have not "moved on" yet)
+  //   2. reconfiguration is not already ongoing
+  private void setupReconfigDS(ShardConfig shardConfigNew) {
+    assertWithThrow(this.shardConfigLatest != null,  "S3.setupReconfigDS: null latest config");
+    assertWithThrow(shardConfigNew.configNum() == this.shardConfigLatest.configNum() + 1, "S3.setupReconfigDS: config in new should be one larger");
+    assertWithThrow(!isReconfigOngoing(), "S3.setupReconfigDS: reconfig ongoing but decision for another reconfig being processed");
+
+    Set<Integer> shardsThisGroupOldConfig = getShards(this.shardConfigLatest, this.groupId);
+    Set<Integer> shardsThisGroupNewConfig = getShards(shardConfigNew, this.groupId);
+
+    if (shardsThisGroupOldConfig.size() == shardsThisGroupNewConfig.size()) {
+      // unchanged, don't do anything
+      assertWithThrow(shardsThisGroupOldConfig.equals(shardsThisGroupNewConfig),
+                      "S3.setupReconfigDS: equal number of shards but shards were moved (suboptimal)");
+    }
+    else if (shardsThisGroupOldConfig.size() > shardsThisGroupNewConfig.size()) {
+      // losing shards
+      assertWithThrow(shardsThisGroupOldConfig.containsAll(shardsThisGroupNewConfig),
+                      "S3.setupReconfigDS: losing shards but also gained new ones (suboptimal)");
+
+      constructReconfigDecisionsNeeded(this.shardConfigLatest, shardConfigNew);
+
+      assertWithThrow(false, this.address() + " LOSING SHARDS=" + this.reconfigAcksNeeded);
+    }
+    else {
+      // gaining shards
+      assertWithThrow(shardsThisGroupNewConfig.containsAll(shardsThisGroupOldConfig),
+                      "S3.setupReconfigDS: gaining shards but lost original ones (suboptimal)");
+
+      constructReconfigDecisionsNeeded(this.shardConfigLatest, shardConfigNew);
+
+      assertWithThrow(false, this.address() + " GAINING SHARDS " + reconfigMovesNeeded);
+    }
+  }
+
+  private void constructReconfigDecisionsNeeded(@NonNull ShardConfig shardConfigOld, @NonNull ShardConfig shardConfigNew) {
+    assertWithThrow(this.reconfigAcksNeeded.isEmpty() && this.reconfigMovesNeeded.isEmpty(),
+                    "S3.constructReconfigDecisionsNeeded: group should have empty reconfig data structures");
+
+    for (int shard = ShardMaster.SHARD_NUM_START; shard <= numTotalShards; shard++) {
+      int groupMngShardOldConfig = getGroupIdForShard(shardConfigOld, shard);
+      int groupMngShardNewConfig = getGroupIdForShard(shardConfigNew, shard);
+
+      // this group is losing a shard
+      if (groupMngShardOldConfig == this.groupId && groupMngShardNewConfig != this.groupId) {
+        this.reconfigAcksNeeded.putIfAbsent(groupMngShardNewConfig, new HashSet<>());
+        this.reconfigAcksNeeded.get(groupMngShardNewConfig).add(shard);
+      }
+
+      // this group is gaining a shard
+      if (groupMngShardOldConfig != this.groupId && groupMngShardNewConfig == this.groupId) {
+        this.reconfigMovesNeeded.putIfAbsent(groupMngShardOldConfig, new HashSet<>());
+        this.reconfigMovesNeeded.get(groupMngShardOldConfig).add(shard);
+      }
+    }
+
+    assertWithThrow(this.reconfigAcksNeeded.isEmpty() || this.reconfigMovesNeeded.isEmpty(),
+                    "S3.constructReconfigDecisionsNeeded: group should not both gain and lose shards");
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -220,6 +303,15 @@ public class ShardStoreServer extends ShardStoreNode {
   /* -----------------------------------------------------------------------------------------------
    *  Utils
    * ---------------------------------------------------------------------------------------------*/
+
+  // returns the set of shards that the group in the argument manages, or returns emptyset
+  // if the group in the argument is not in the configuration passed in
+  private Set<Integer> getShards(@NonNull ShardConfig shardConfig, int groupIdGetShards) {
+    if (!shardConfig.groupInfo().containsKey(groupIdGetShards)) {
+      return new HashSet<>();
+    }
+    return shardConfig.groupInfo().get(groupIdGetShards).getRight();
+  }
 
   private boolean isReconfigOngoing() {
     return (this.reconfigMovesNeeded.size() + this.reconfigAcksNeeded.size()) > 0;

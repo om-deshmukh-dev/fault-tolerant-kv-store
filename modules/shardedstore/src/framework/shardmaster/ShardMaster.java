@@ -20,6 +20,7 @@ import org.apache.commons.lang3.tuple.Pair;
 public final class ShardMaster implements Application {
   public static final int INVALID_CONFIG_NUM = -1;
   public static final int INITIAL_CONFIG_NUM = 0;
+  public static final int SHARD_NUM_START = 1;
 
   private final int numShards;
 
@@ -330,7 +331,7 @@ public final class ShardMaster implements Application {
 
   private Set<Integer> initFullSetShards() {
     Set<Integer> shards = new HashSet<>();
-    for (int shard = 1; shard <= this.numShards; shard++) {
+    for (int shard = SHARD_NUM_START; shard <= this.numShards; shard++) {
       shards.add(shard);
     }
     return shards;

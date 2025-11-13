@@ -14,6 +14,7 @@ import framework.shardmaster.ShardMaster.Query;
 import framework.shardmaster.ShardMaster.ShardConfig;
 import java.util.Set;
 import lombok.EqualsAndHashCode;
+import lombok.NonNull;
 import lombok.ToString;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.commons.lang3.tuple.Pair;
@@ -52,7 +53,7 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
     this.result = null;
 
     if (this.shardConfigLatest != null) {
-      sendRequestToGroupMembers(request, getGroupIdForShard(keyToShard(singleKeyCommand.key())));
+      sendRequestToGroupMembers(request, getGroupIdForShard(this.shardConfigLatest, keyToShard(singleKeyCommand.key())));
     }
 
     set(new ClientTimer(request), ClientTimer.CLIENT_RETRY_MILLIS);
@@ -112,7 +113,7 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
     // reset timer and broadcast request again for latest ongoing request
     if (t.request().command().sequenceNum() == this.sequenceNumCommands) {
       SingleKeyCommand command = (SingleKeyCommand) t.request().command().command();
-      int groupIdManagingShard = getGroupIdForShard(keyToShard(command.key()));
+      int groupIdManagingShard = getGroupIdForShard(this.shardConfigLatest, keyToShard(command.key()));
 
       sendRequestToGroupMembers(t.request(), groupIdManagingShard);
       set(t, ClientTimer.CLIENT_RETRY_MILLIS);
@@ -148,23 +149,6 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
         new PaxosRequest(new AMOCommand(query, this.address(), this.sequenceNumQueries)),
         this.shardMasters()
     );
-  }
-
-  // Find the group in the current configuration managing `shardNum`.
-  // It is required that exactly one group is managing this shard in the
-  // latest configuration at the client.
-  private int getGroupIdForShard(int shardNum) {
-    assertWithMessage(this.shardConfigLatest != null, "ShardClient.getGroupIdForShard: calling with null config");
-
-    for (Integer groupId : this.shardConfigLatest.groupInfo().keySet()) {
-      Pair<Set<Address>, Set<Integer>> groupMetadata = this.shardConfigLatest.groupInfo().get(groupId);
-
-      if (groupMetadata.getRight().contains(shardNum)) { return groupId; }
-    }
-
-    // should never get to this point (the server set partitions the shards)
-    assertWithMessage(false, "ShardClient.getGroupIdForShard: some group must manage shard");
-    return -1;
   }
 
   private void assertWithMessage(boolean b, String m) {

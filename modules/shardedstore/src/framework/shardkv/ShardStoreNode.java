@@ -3,12 +3,15 @@ package framework.shardkv;
 import framework.Address;
 import framework.Message;
 import framework.Node;
+import framework.shardmaster.ShardMaster;
 import java.util.Collections;
 import java.util.LinkedList;
+import java.util.Set;
 import lombok.AccessLevel;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
 import lombok.NonNull;
+import org.apache.commons.lang3.tuple.Pair;
 
 @EqualsAndHashCode(callSuper = true)
 abstract class ShardStoreNode extends Node {
@@ -25,6 +28,18 @@ abstract class ShardStoreNode extends Node {
 
   void broadcastToShardMasters(Message message) {
     broadcast(message, shardMasters);
+  }
+
+  // Find the group in the current configuration managing `shardNum`.
+  // It is required that exactly one group is managing this shard in the
+  // latest configuration at the client.
+  int getGroupIdForShard(@NonNull ShardMaster.ShardConfig shardConfig, int shardNum) {
+    for (Integer groupId : shardConfig.groupInfo().keySet()) {
+      Pair<Set<Address>, Set<Integer>> groupMetadata = shardConfig.groupInfo().get(groupId);
+
+      if (groupMetadata.getRight().contains(shardNum)) { return groupId; }
+    }
+    return -1;
   }
 
   /**

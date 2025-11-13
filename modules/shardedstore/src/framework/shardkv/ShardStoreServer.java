@@ -159,6 +159,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
   private void processSingleKeyCommand(@NonNull AMOCommand amoCommand, boolean isReplicated) {
     assertWithThrow(amoCommand.command() instanceof SingleKeyCommand, "S3.processSingleKeyCommand: called with wrong command type");
+    assertWithThrow(!isReconfigOngoing(), "S3.processSingleKeyCommand: reconfig ongoing case");
 
     // check if this group is managing the shard
     SingleKeyCommand singleKeyCommand = (SingleKeyCommand) amoCommand.command();
@@ -223,7 +224,7 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private boolean isManagingShard(int shardNum) {
-    return this.shardConfigLatest != null && this.amoApplicationSharded.containsKey(shardNum);
+    return this.shardConfigLatest != null && this.shardConfigLatest.groupInfo().get(this.groupId).getRight().contains(shardNum);
   }
 
   private AMOCommand wrapInDummyAMO(Command command) {

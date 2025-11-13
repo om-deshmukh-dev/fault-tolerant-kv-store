@@ -38,7 +38,7 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
   @Override
   public synchronized void init() {
     sendQueryShardMasters();
-    set(new ClientQueryTimer(), ClientQueryTimer.CLIENT_QUERY_RETRY_MILLIS);
+    set(new QueryTimer(), QueryTimer.QUERY_RETRY_MILLIS);
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -110,9 +110,9 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
     }
   }
 
-  private synchronized void onClientQueryTimer(ClientQueryTimer t) {
+  private synchronized void onQueryTimer(QueryTimer t) {
     sendQueryShardMasters();
-    set(t, ClientQueryTimer.CLIENT_QUERY_RETRY_MILLIS);
+    set(t, QueryTimer.QUERY_RETRY_MILLIS);
   }
 
   /* -----------------------------------------------------------------------------------------------

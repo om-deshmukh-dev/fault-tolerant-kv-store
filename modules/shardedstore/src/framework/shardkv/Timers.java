@@ -11,8 +11,8 @@ final class ClientTimer implements Timer {
 }
 
 @Data
-final class ClientQueryTimer implements Timer {
-  static final int CLIENT_QUERY_RETRY_MILLIS = 100;
+final class QueryTimer implements Timer {
+  static final int QUERY_RETRY_MILLIS = 100;
 }
 
 // Your code here...

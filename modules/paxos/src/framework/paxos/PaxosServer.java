@@ -24,8 +24,8 @@ public class PaxosServer extends Node {
   private final Address[] servers;
   private final AMOApplication<Application> amoApplication;
 
-  private static final int LOG_START = 1;
-  private static final int LOG_UNKNOWN = 0;
+  public static final int LOG_START = 1;
+  public static final int LOG_UNKNOWN = 0;
 
   @Data
   public static class Ballot implements Comparable<Ballot>, Serializable {

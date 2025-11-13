@@ -1,6 +1,7 @@
 package framework.shardkv;
 
 import framework.atmostonce.AMOCommand;
+import framework.atmostonce.AMOResult;
 import framework.Message;
 import framework.shardmaster.ShardMaster.ShardConfig;
 import lombok.Data;
@@ -12,5 +13,5 @@ final class ShardStoreRequest implements Message {
 
 @Data
 final class ShardStoreReply implements Message {
-  // Your code here...
+  private final AMOResult result;
 }

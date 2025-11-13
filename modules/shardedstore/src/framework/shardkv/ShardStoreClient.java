@@ -47,9 +47,12 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
   @Override
   public synchronized void sendCommand(Command command) {
     ShardStoreRequest request = new ShardStoreRequest(new AMOCommand(command, this.address(), this.sequenceNumCommands));
+    SingleKeyCommand singleKeyCommand = (SingleKeyCommand) command;
     this.result = null;
 
-    assertWithThrow(this.shardConfigLatest == null);
+    if (this.shardConfigLatest != null) {
+      sendRequestToGroupMembers(request, getGroupIdForShard(keyToShard(singleKeyCommand.key())));
+    }
 
     set(new ClientTimer(request), ClientTimer.CLIENT_RETRY_MILLIS);
   }
@@ -71,7 +74,13 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
 
   // for SingleKeyCommands
   private synchronized void handleShardStoreReply(ShardStoreReply m, Address sender) {
-    assertWithThrow(false);
+    AMOResult amoResult = m.result();
+
+    if (amoResult.sequenceNum() == this.sequenceNumCommands) {
+      this.result = amoResult.result();
+      this.sequenceNumCommands++;
+      notify();
+    }
   }
 
 
@@ -81,7 +90,8 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
 
     if (amoResult.sequenceNum() == this.sequenceNumQueries) {
       ShardConfig shardConfigNew = (ShardConfig) amoResult.result();
-      assertWithThrow(this.shardConfigLatest == null || this.shardConfigLatest.configNum() <= shardConfigNew.configNum());
+      assertWithMessage(this.shardConfigLatest == null || this.shardConfigLatest.configNum() <= shardConfigNew.configNum(),
+                        "ShardClient.handlePaxosReply: new config must be at least as large as this client's latest config");
       this.shardConfigLatest = shardConfigNew;
       this.sequenceNumQueries++;
     }
@@ -97,16 +107,13 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
       return;
     }
 
-    // reset timer for latest ongoing request
+    // reset timer and broadcast request again for latest ongoing request
     if (t.request().command().sequenceNum() == this.sequenceNumCommands) {
       SingleKeyCommand command = (SingleKeyCommand) t.request().command().command();
       int groupIdManagingShard = getGroupIdForShard(keyToShard(command.key()));
 
-      assertWithThrow(this.shardConfigLatest.groupInfo().containsKey(groupIdManagingShard));
-      Set<Address> serversInGroup = this.shardConfigLatest.groupInfo().get(groupIdManagingShard).getLeft();
-
-      assertWithThrow(!serversInGroup.isEmpty());
-      broadcast(t.request(), serversInGroup);
+      sendRequestToGroupMembers(t.request(), groupIdManagingShard);
+      set(t, ClientTimer.CLIENT_RETRY_MILLIS);
     }
   }
 
@@ -118,6 +125,19 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
   /* -----------------------------------------------------------------------------------------------
    *  Helpers
    * ---------------------------------------------------------------------------------------------*/
+
+  // send request to all group members associated with the group ID given as argument.
+  // requires that the latest configuration is not null
+  private void sendRequestToGroupMembers(ShardStoreRequest request, int groupIdManagingShard) {
+    assertWithMessage(this.shardConfigLatest != null, "ShardClient.sendRequestToGroupMembers: null config");
+    assertWithMessage(this.shardConfigLatest.groupInfo().containsKey(groupIdManagingShard),
+                      "ShardClient.sendRequestToGroupMembers: group managing shard must be in latest config");
+
+    Set<Address> serversInGroup = this.shardConfigLatest.groupInfo().get(groupIdManagingShard).getLeft();
+    assertWithMessage(!serversInGroup.isEmpty(), "ShardClient.onClientTimer: should at least be one server in group managing shard");
+
+    broadcast(request, serversInGroup);
+  }
 
   // send a query with the latest configuration number to all shard masters
   private void sendQueryShardMasters() {
@@ -132,7 +152,7 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
   // It is required that exactly one group is managing this shard in the
   // latest configuration at the client.
   private int getGroupIdForShard(int shardNum) {
-    assertWithThrow(this.shardConfigLatest != null);
+    assertWithMessage(this.shardConfigLatest != null, "ShardClient.getGroupIdForShard: calling with null config");
 
     for (Integer groupId : this.shardConfigLatest.groupInfo().keySet()) {
       Pair<Set<Address>, Set<Integer>> groupMetadata = this.shardConfigLatest.groupInfo().get(groupId);
@@ -141,12 +161,13 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
     }
 
     // should never get to this point (the server set partitions the shards)
-    assertWithThrow(false);
+    assertWithMessage(false, "ShardClient.getGroupIdForShard: some group must manage shard");
     return -1;
   }
 
-  private void assertWithThrow(boolean b) {
+  private void assertWithMessage(boolean b, String m) {
     if (!b) {
+      System.out.println(m);
       System.exit(1);
     }
   }

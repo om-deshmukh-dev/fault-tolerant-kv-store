@@ -16,6 +16,7 @@ import framework.shardmaster.ShardMaster;
 import framework.shardmaster.ShardMaster.Query;
 import framework.shardmaster.ShardMaster.ShardConfig;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Set;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
@@ -36,6 +37,9 @@ public class ShardStoreServer extends ShardStoreNode {
   private final HashMap<Integer, AMOApplication<Application>> amoApplicationSharded;
   private ShardConfig shardConfigLatest;
 
+  private final Set<Integer> reconfigMovesNeeded;
+  private final Set<Integer> reconfigAcksNeeded;
+
   // for debugging
   private int paxosLogSlotHighestSeen;
 
@@ -54,6 +58,9 @@ public class ShardStoreServer extends ShardStoreNode {
     this.amoApplicationSharded = new HashMap<>();
     this.shardConfigLatest = null;
     this.paxosLogSlotHighestSeen = PaxosServer.LOG_START - 1;
+
+    this.reconfigMovesNeeded = new HashSet<>();
+    this.reconfigAcksNeeded = new HashSet<>();
   }
 
   @Override
@@ -81,17 +88,37 @@ public class ShardStoreServer extends ShardStoreNode {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void handleShardStoreRequest(ShardStoreRequest m, Address sender) {
-    assertWithThrow(false, "S3.handleShardStoreRequest("+this.address()+"): unimplemented ("+this.shardConfigLatest+"), ("+this.amoApplicationSharded+")");
+    assertWithThrow(m.command().command() instanceof SingleKeyCommand, "S3.handleShardStoreRequest: client req not single key command");
+    assertWithThrow(!isReconfigOngoing(), "S3.handleShardStoreRequest: reconfig ongoing case");
+
+    SingleKeyCommand singleKeyCommand = (SingleKeyCommand) m.command().command();
+    if (!isManagingShard(keyToShard(singleKeyCommand.key()))) {
+      assertWithThrow(false, "S3.handleShardStoreRequest: handle not managing shard case");
+      // TODO: send an error back
+      return;
+    }
+
+    AMOApplication<Application> amoAppFromShard = this.amoApplicationSharded.getOrDefault(keyToShard(singleKeyCommand.key()), null);
+
+    assertWithThrow(amoAppFromShard != null,"S3.handleShardStoreRequest(): managing shard not in application state");
+    assertWithThrow(!amoAppFromShard.alreadyExecuted(m.command()), "S3.handleShardStoreRequest: handle already executed case");
+
+    process(m.command(), false);
   }
 
+  // from a ShardMaster query
   private void handlePaxosReply(PaxosReply m, Address sender) {
+    assertWithThrow(!isReconfigOngoing(), "S3.handlePaxosReply: reconfig ongoing case");
+
     AMOResult amoResult = m.result();
     ShardConfig shardConfigNew = (ShardConfig) amoResult.result();
 
+    // new config num should be at most as large as the new config this server is querying for
     assertWithThrow(shardConfigNew.configNum() <= getConfigNumForQuery(),
-                    "S3.handlePaxosReply: receiving query result with config num too large (" + amoResult.sequenceNum() + ")");
+                    "S3.handlePaxosReply: receiving query result with config num too large");
 
-    // config returned from query matches the new expected config number
+    // config returned from query matches the new expected config number,
+    // send reconfiguration request to paxos subnode
     if (shardConfigNew.configNum() == getConfigNumForQuery()) {
       // bunch of assertions
       assertWithThrow(shardConfigNew.configNum() == amoResult.sequenceNum(),
@@ -100,7 +127,8 @@ public class ShardStoreServer extends ShardStoreNode {
       if (this.shardConfigLatest == null) {
         assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM,
                         "S3.handlePaxosReply: empty config but first query returns non-initial config num");
-      } else {
+      }
+      else {
         assertWithThrow(this.shardConfigLatest.configNum() + 1 == shardConfigNew.configNum(),
                         "S3.handlePaxosReply: config in new shard must be one higher than current config (due to first if conditional)");
       }
@@ -122,35 +150,60 @@ public class ShardStoreServer extends ShardStoreNode {
   private void process(@NonNull AMOCommand amoCommand, boolean isReplicated) {
     if (amoCommand.command() instanceof NewConfig) {
       processNewConfig(amoCommand, isReplicated);
+    } else if (amoCommand.command() instanceof SingleKeyCommand) {
+      processSingleKeyCommand(amoCommand, isReplicated);
     } else {
       assertWithThrow(false, "S3.process: have not handled non-NewConfig case yet");
     }
   }
 
+  private void processSingleKeyCommand(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertWithThrow(amoCommand.command() instanceof SingleKeyCommand, "S3.processSingleKeyCommand: called with wrong command type");
+
+    // check if this group is managing the shard
+    SingleKeyCommand singleKeyCommand = (SingleKeyCommand) amoCommand.command();
+    int shardForKey = keyToShard(singleKeyCommand.key());
+    if (!isManagingShard(shardForKey)) {
+      return;
+    }
+    assertWithThrow(this.amoApplicationSharded.containsKey(shardForKey), "S3.processSingleKeyCommand: group manages shard, but app doesn't contain it");
+
+    // group manages shard, either propose to paxos subnode or execute command (depending on if replicated)
+    if (!isReplicated) {
+      handleMessage(new PaxosRequest(amoCommand), paxosAddress);
+    } else {
+      // execute the command and send result back to client
+      AMOResult amoResult = this.amoApplicationSharded.get(shardForKey).execute(amoCommand);
+      send(new ShardStoreReply(amoResult), amoCommand.address());
+    }
+  }
+
   private void processNewConfig(AMOCommand amoCommand, boolean isReplicated) {
-    assertWithThrow(amoCommand.command() instanceof NewConfig, "S3.processNewConfig: command must be NewConfig");
     ShardConfig shardConfigNew = ((NewConfig)amoCommand.command()).shardConfig();
+
+    // TODO: may be able to assert that config in decision is at most one higher than current config
+    assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM, "S3.processNewConfig: haven't handled other config numbers yet");
+    assertWithThrow(!isReconfigOngoing(), "S3.processNewConfig: handle reconfig case");
 
     if (!isReplicated) {
       // TODO: add assertions here
       handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
-      return;
-    }
+    } else {
+      // replicated new config, assuming INITIAL_CONFIG, take on
+      // new shards if managing them, then take on new config
+      if (shardConfigNew.groupInfo().containsKey(this.groupId)) {
+        assertWithThrow(this.amoApplicationSharded != null && this.amoApplicationSharded.isEmpty(), "S3.processNewConfig: map not init to empty");
 
-    assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM, "S3.processNewConfig: haven't handled other config numbers yet");
-
-    if (shardConfigNew.groupInfo().containsKey(this.groupId)) {
-      assertWithThrow(this.amoApplicationSharded != null && this.amoApplicationSharded.isEmpty(),
-          "S3.processNewConfig: map not init to empty");
-
-      // assign this group all the shards
-      Set<Integer> shardsInNewConfig = shardConfigNew.groupInfo().get(this.groupId).getRight();
-      for (Integer shardNum : shardsInNewConfig) {
-        this.amoApplicationSharded.put(shardNum, new AMOApplication<>(new KVStore(), new HashMap<>()));
+        // assign this group all the shards
+        Set<Integer> shardsInNewConfig = shardConfigNew.groupInfo().get(this.groupId).getRight();
+        for (Integer shardNum : shardsInNewConfig) {
+          this.amoApplicationSharded.put(shardNum, new AMOApplication<>(new KVStore(), new HashMap<>()));
+        }
       }
-    }
 
-    this.shardConfigLatest = shardConfigNew;
+      // on NewConfig decision, take on the new configuration
+      this.shardConfigLatest = shardConfigNew;
+    }
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -164,6 +217,14 @@ public class ShardStoreServer extends ShardStoreNode {
   /* -----------------------------------------------------------------------------------------------
    *  Utils
    * ---------------------------------------------------------------------------------------------*/
+
+  private boolean isReconfigOngoing() {
+    return (this.reconfigMovesNeeded.size() + this.reconfigAcksNeeded.size()) > 0;
+  }
+
+  private boolean isManagingShard(int shardNum) {
+    return this.shardConfigLatest != null && this.amoApplicationSharded.containsKey(shardNum);
+  }
 
   private AMOCommand wrapInDummyAMO(Command command) {
     assertWithThrow(!(command instanceof AMOCommand), "S3.wrapInDummyAMO: wrapping command already an AMO");

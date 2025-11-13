@@ -93,17 +93,19 @@ public class ShardStoreServer extends ShardStoreNode {
 
     SingleKeyCommand singleKeyCommand = (SingleKeyCommand) m.command().command();
     if (!isManagingShard(keyToShard(singleKeyCommand.key()))) {
-      assertWithThrow(false, "S3.handleShardStoreRequest: handle not managing shard case");
       // TODO: send an error back
       return;
     }
 
     AMOApplication<Application> amoAppFromShard = this.amoApplicationSharded.getOrDefault(keyToShard(singleKeyCommand.key()), null);
-
     assertWithThrow(amoAppFromShard != null,"S3.handleShardStoreRequest(): managing shard not in application state");
-    assertWithThrow(!amoAppFromShard.alreadyExecuted(m.command()), "S3.handleShardStoreRequest: handle already executed case");
 
-    process(m.command(), false);
+    if (amoAppFromShard.alreadyExecuted(m.command())) {
+      AMOResult amoResult = amoAppFromShard.execute(m.command());
+      send(new ShardStoreReply(amoResult), sender);
+    } else {
+      process(m.command(), false);
+    }
   }
 
   // from a ShardMaster query
@@ -138,7 +140,7 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private void handlePaxosDecision(PaxosDecision decision, Address sender) {
-    assertWithThrow(decision.slotNum() == (this.paxosLogSlotHighestSeen + 1), "S3.handlePaxosDecision: decisions not sent monotonically");
+    assertWithThrow(this.group.length == 1 || decision.slotNum() == (this.paxosLogSlotHighestSeen + 1), "S3.handlePaxosDecision: decisions not sent monotonically");
     this.paxosLogSlotHighestSeen++;
     process(decision.amoCommand(), true);
   }
@@ -234,6 +236,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
   private void sendQueryShardMasters() {
     Query query = new Query(getConfigNumForQuery());
+    // TODO: this assumption is wrong (the initial config number may be an ERROR)
     // can use the configuration number as the sequence number (since
     // each configuration number has exactly one configuration)
     broadcast(

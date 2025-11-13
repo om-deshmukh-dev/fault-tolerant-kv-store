@@ -162,14 +162,14 @@ public class PaxosServer extends Node {
     // (the other data structures or timers may be messed up, but it does not matter
     // since a server does not send to itself nor calls any other message handlers)
     if (this.servers.length == 1) {
-      // TODO: handle length == 1 with new SubNode paxos
-      assertWithMessage(false, "PaxosServer.handlePaxosRequest (lab 4): have not handled length == 1");
-      AMOResult amoResult = this.amoApplication.execute(m.command());
-      send(new PaxosReply(amoResult), sender);
+      if (isSubnode()) {
+        handleMessage(new PaxosDecision(LOG_UNKNOWN, m.command()), this.parentAddress);
+      } else {
+        AMOResult amoResult = this.amoApplication.execute(m.command());
+        send(new PaxosReply(amoResult), m.command().address());
+      }
       return;
     }
-
-    // assertWithMessage(false, "PaxosServer.handlePaxosRequest (lab 4): have not handled length > 1");
 
     if (!this.isLeaderElected) {
       // still in leader election, drive progress

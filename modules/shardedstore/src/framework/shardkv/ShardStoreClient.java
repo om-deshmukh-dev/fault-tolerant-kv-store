@@ -9,6 +9,7 @@ import framework.Result;
 import framework.kvstore.KVStore.SingleKeyCommand;
 import framework.paxos.PaxosReply;
 import framework.paxos.PaxosRequest;
+import framework.shardmaster.ShardMaster.Error;
 import framework.shardmaster.ShardMaster.Query;
 import framework.shardmaster.ShardMaster.ShardConfig;
 import java.util.Set;
@@ -88,6 +89,7 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
   private synchronized void handlePaxosReply(PaxosReply m, Address sender) {
     AMOResult amoResult = m.result();
 
+    // TODO: handle getting back an error
     if (amoResult.sequenceNum() == this.sequenceNumQueries) {
       ShardConfig shardConfigNew = (ShardConfig) amoResult.result();
       assertWithMessage(this.shardConfigLatest == null || this.shardConfigLatest.configNum() <= shardConfigNew.configNum(),

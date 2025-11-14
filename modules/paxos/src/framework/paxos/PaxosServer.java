@@ -8,6 +8,7 @@ import framework.Application;
 import framework.Command;
 import framework.Message;
 import framework.Node;
+import framework.Result;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -179,6 +180,7 @@ public class PaxosServer extends Node {
     // a server that has already executed the request can immediately send back a reply
     if (isAlreadyExecuted(m.command())) {
       AMOResult amoResult = this.amoApplication.execute(m.command());
+      // TODO: Should fix things: this.amoApplication.executeReadOnly()
       send(new PaxosReply(amoResult), sender);
       return;
     }

@@ -4,7 +4,9 @@ import framework.Address;
 import framework.Message;
 import framework.Node;
 import framework.shardmaster.ShardMaster;
+import framework.shardmaster.ShardMaster.ShardConfig;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.Set;
 import lombok.AccessLevel;
@@ -33,13 +35,20 @@ abstract class ShardStoreNode extends Node {
   // Find the group in the current configuration managing `shardNum`.
   // It is required that exactly one group is managing this shard in the
   // latest configuration at the client.
-  int getGroupIdForShard(@NonNull ShardMaster.ShardConfig shardConfig, int shardNum) {
+  int getGroupIdForShard(@NonNull ShardConfig shardConfig, int shardNum) {
     for (Integer groupId : shardConfig.groupInfo().keySet()) {
       Pair<Set<Address>, Set<Integer>> groupMetadata = shardConfig.groupInfo().get(groupId);
 
       if (groupMetadata.getRight().contains(shardNum)) { return groupId; }
     }
     return -1;
+  }
+
+  Set<Address> getServersForGroupId(@NonNull ShardConfig shardConfig, int groupId) {
+    if (shardConfig.groupInfo().containsKey(groupId)) {
+      return shardConfig.groupInfo().get(groupId).getLeft();
+    }
+    return new HashSet<>();
   }
 
   /**

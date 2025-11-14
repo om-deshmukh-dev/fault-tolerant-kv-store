@@ -17,7 +17,9 @@ import framework.shardmaster.ShardMaster.Query;
 import framework.shardmaster.ShardMaster.ShardConfig;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
@@ -41,6 +43,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
   private final Map<Integer, Set<Integer>> reconfigMovesNeeded;
   private final Map<Integer, Set<Integer>> reconfigAcksNeeded;
+  private final Queue<AMOCommand> commandsRejectedDuringReconfig;
 
   // for debugging
   private int paxosLogSlotHighestSeen;
@@ -78,6 +81,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
     this.reconfigMovesNeeded = new HashMap<>();
     this.reconfigAcksNeeded = new HashMap<>();
+    this.commandsRejectedDuringReconfig = new LinkedList<>();
   }
 
   @Override
@@ -108,7 +112,7 @@ public class ShardStoreServer extends ShardStoreNode {
     assertWithThrow(m.command().command() instanceof SingleKeyCommand, "S3.handleShardStoreRequest: client req not single key command");
 
     if (isReconfigOngoing()) {
-      // TODO: should queue up amoCommand in CommandsRejectedDuringReconfig
+      this.commandsRejectedDuringReconfig.add(m.command());
       return;
     }
 
@@ -242,7 +246,10 @@ public class ShardStoreServer extends ShardStoreNode {
       });
       this.reconfigAcksNeeded.remove(shardMoveAckToUs.groupIdReceiver());
 
-      // TODO: handle CommandsRejectedDuringReconfig once last ack is decided
+      if (!isReconfigOngoing()) {
+        assertWithThrow(this.reconfigMovesNeeded.isEmpty(), "S3.processShardMoveAckCommand: acks done but moves still needed");
+        processRejectedCommands();
+      }
     }
   }
 
@@ -279,7 +286,10 @@ public class ShardStoreServer extends ShardStoreNode {
           getServersForGroupId(this.shardConfigLatest, shardMoveToUs.groupIdSender())
       );
 
-      // TODO: handle CommandsRejectedDuringReconfig once last move is decided
+      if (!isReconfigOngoing()) {
+        assertWithThrow(this.reconfigAcksNeeded.isEmpty(), "S3.processShardMoveCommand: moves done but acks still needed");
+        processRejectedCommands();
+      }
     }
 
   }
@@ -352,6 +362,18 @@ public class ShardStoreServer extends ShardStoreNode {
   /* -----------------------------------------------------------------------------------------------
    *  Core Helpers
    * ---------------------------------------------------------------------------------------------*/
+
+  // process all commands that were rejected during reconfiguration, now that reconfiguration
+  // is complete. Commands are processed as unreplicated (need to be proposed to Paxos now)
+  // since they were only queued but never proposed during reconfiguration
+  private void processRejectedCommands() {
+    assertWithThrow(!isReconfigOngoing(), "S3.processRejectedCommands: reconfig still ongoing");
+
+    while (!this.commandsRejectedDuringReconfig.isEmpty()) {
+      AMOCommand amoCommand = this.commandsRejectedDuringReconfig.poll();
+      process(amoCommand, false);
+    }
+  }
 
   // Given a new shard configuration, if the shards in this group have changed,
   // set up the reconfiguration data structures. It is assumed that:

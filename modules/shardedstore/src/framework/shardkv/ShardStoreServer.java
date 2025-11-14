@@ -50,14 +50,14 @@ public class ShardStoreServer extends ShardStoreNode {
 
   @Data
   public static final class ShardMove implements Command {
-    private final int groupIdSender;
+    private final int groupIdSender; // the group that sent the shards (the group that gets this message is gaining shards)
     private final int configNum;
     private final Map<Integer, AMOApplication<Application>> amoAppShards;
   }
 
   @Data
   public static final class ShardMoveAck implements Command {
-    private final int groupIdReceiver;
+    private final int groupIdReceiver; // the group that received the shards (the group that gets this message is the original sender of the shards)
     private final int configNum;
     private final Map<Integer, AMOApplication<Application>> amoAppShards;
   }
@@ -138,6 +138,7 @@ public class ShardStoreServer extends ShardStoreNode {
       return; // already received the move (or reconfig is not ongoing)
     }
 
+    // TODO: be careful about processing a ShardMove message while reconfiguration is not ongoing, or reconfiguration is ongoing for losing shards (the last two elifs handle this)
     // TODO: optimize sending back ack
 
     process(wrapInDummyAMO(m.shardMove()), false);
@@ -151,6 +152,8 @@ public class ShardStoreServer extends ShardStoreNode {
     } else if (!this.reconfigAcksNeeded.containsKey(m.shardMoveAck().groupIdReceiver())) {
       return; // already received ack (or reconfig is not ongoing)
     }
+
+    // TODO: be careful about processing a ShardMoveAck message while reconfiguration is not ongoing, or reconfiguration is ongoing for gaining shards (the last two elifs handle this)
 
     process(wrapInDummyAMO(m.shardMoveAck()), false);
   }

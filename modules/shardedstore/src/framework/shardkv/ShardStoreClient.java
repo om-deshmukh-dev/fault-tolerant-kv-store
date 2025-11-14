@@ -90,8 +90,13 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
   private synchronized void handlePaxosReply(PaxosReply m, Address sender) {
     AMOResult amoResult = m.result();
 
-    // TODO: handle getting back an error
     if (amoResult.sequenceNum() == this.sequenceNumQueries) {
+      // ignore errors from ShardMaster
+      if (amoResult.result() instanceof Error) {
+        this.sequenceNumQueries++;
+        return;
+      }
+      
       ShardConfig shardConfigNew = (ShardConfig) amoResult.result();
       assertWithMessage(this.shardConfigLatest == null || this.shardConfigLatest.configNum() <= shardConfigNew.configNum(),
                         "ShardClient.handlePaxosReply: new config must be at least as large as this client's latest config");

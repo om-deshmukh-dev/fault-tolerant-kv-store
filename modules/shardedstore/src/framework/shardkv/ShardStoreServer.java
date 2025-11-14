@@ -168,8 +168,13 @@ public class ShardStoreServer extends ShardStoreNode {
       return; // can't do much with a new configuration while an older one is being processed
     }
 
-    // TODO: handle error config
     AMOResult amoResult = m.result();
+    
+    // ignore errors from ShardMaster, retry on next query
+    if (amoResult.result() instanceof ShardMaster.Error) {
+      return;
+    }
+    
     ShardConfig shardConfigNew = (ShardConfig) amoResult.result();
 
     // new config num should be at most as large as the new config this server is querying for
@@ -363,9 +368,7 @@ public class ShardStoreServer extends ShardStoreNode {
    *  Core Helpers
    * ---------------------------------------------------------------------------------------------*/
 
-  // process all commands that were rejected during reconfiguration, now that reconfiguration
-  // is complete. Commands are processed as unreplicated (need to be proposed to Paxos now)
-  // since they were only queued but never proposed during reconfiguration
+  // process commands that were queued during reconfiguration
   private void processRejectedCommands() {
     assertWithThrow(!isReconfigOngoing(), "S3.processRejectedCommands: reconfig still ongoing");
 
@@ -475,17 +478,14 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private synchronized void onResendShardMovesTimer(ResendShardMovesTimer t) {
-    // don't reset if we've moved past this configuration
     if (this.shardConfigLatest == null || t.configNum() > this.shardConfigLatest.configNum()) {
       return;
     }
 
-    // don't reset if we've moved past this configuration or reconfig is no longer ongoing
     if (t.configNum() < this.shardConfigLatest.configNum() || !isReconfigOngoing()) {
       return;
     }
 
-    // still waiting for acks, resend the shard moves
     assertWithThrow(!this.reconfigAcksNeeded.isEmpty(), "S3.onResendShardMovesTimer: reconfig ongoing but acks empty");
     resendShardMoves(this.shardConfigLatest);
     set(t, ResendShardMovesTimer.RESEND_MILLIS);
@@ -521,9 +521,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
   private void sendQueryShardMasters() {
     Query query = new Query(getConfigNumForQuery());
-    // TODO: this assumption is wrong (the initial config number may be an ERROR)
-    // can use the configuration number as the sequence number (since
-    // each configuration number has exactly one configuration)
+    // use config number as sequence number
     broadcast(
         new PaxosRequest(new AMOCommand(query, this.address(), getConfigNumForQuery())),
         this.shardMasters()

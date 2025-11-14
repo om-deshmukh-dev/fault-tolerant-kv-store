@@ -15,4 +15,8 @@ final class QueryTimer implements Timer {
   static final int QUERY_RETRY_MILLIS = 100;
 }
 
-// Your code here...
+@Data
+final class ResendShardMovesTimer implements Timer {
+  static final int RESEND_MILLIS = 100;
+  private final int configNum;
+}

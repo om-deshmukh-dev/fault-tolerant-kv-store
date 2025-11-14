@@ -402,7 +402,7 @@ public class ShardStoreServer extends ShardStoreNode {
       assertWithThrow(!this.reconfigAcksNeeded.isEmpty(), "S3.setupReconfigDS: acks needed empty (should be non-empty)");
 
       resendShardMoves(shardConfigNew);
-      // TODO: add timer for resending shards
+      set(new ResendShardMovesTimer(shardConfigNew.configNum()), ResendShardMovesTimer.RESEND_MILLIS);
     }
     else {
       // gaining shards
@@ -472,6 +472,23 @@ public class ShardStoreServer extends ShardStoreNode {
   private synchronized void onQueryTimer(QueryTimer t) {
     sendQueryShardMasters();
     set(t, QueryTimer.QUERY_RETRY_MILLIS);
+  }
+
+  private synchronized void onResendShardMovesTimer(ResendShardMovesTimer t) {
+    // don't reset if we've moved past this configuration
+    if (this.shardConfigLatest == null || t.configNum() > this.shardConfigLatest.configNum()) {
+      return;
+    }
+
+    // don't reset if we've moved past this configuration or reconfig is no longer ongoing
+    if (t.configNum() < this.shardConfigLatest.configNum() || !isReconfigOngoing()) {
+      return;
+    }
+
+    // still waiting for acks, resend the shard moves
+    assertWithThrow(!this.reconfigAcksNeeded.isEmpty(), "S3.onResendShardMovesTimer: reconfig ongoing but acks empty");
+    resendShardMoves(this.shardConfigLatest);
+    set(t, ResendShardMovesTimer.RESEND_MILLIS);
   }
 
   /* -----------------------------------------------------------------------------------------------

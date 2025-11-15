@@ -179,8 +179,14 @@ public class PaxosServer extends Node {
 
     // a server that has already executed the request can immediately send back a reply
     if (isAlreadyExecuted(m.command())) {
-      AMOResult amoResult = this.amoApplication.execute(m.command());
-      // TODO: Should fix things: this.amoApplication.executeReadOnly()
+      AMOResult amoResult;
+
+      if (m.command().command().readOnly()) {
+        amoResult = new AMOResult(this.amoApplication.executeReadOnly(m.command().command()), m.command().sequenceNum());
+      } else {
+        amoResult = this.amoApplication.execute(m.command());
+      }
+
       send(new PaxosReply(amoResult), sender);
       return;
     }

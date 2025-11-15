@@ -9,6 +9,7 @@ import framework.Result;
 import framework.kvstore.KVStore.SingleKeyCommand;
 import framework.paxos.PaxosReply;
 import framework.paxos.PaxosRequest;
+import framework.shardmaster.ShardMaster;
 import framework.shardmaster.ShardMaster.Error;
 import framework.shardmaster.ShardMaster.Query;
 import framework.shardmaster.ShardMaster.ShardConfig;
@@ -24,7 +25,6 @@ import org.apache.commons.lang3.tuple.Pair;
 public class ShardStoreClient extends ShardStoreNode implements Client {
   private ShardConfig shardConfigLatest;
   private int sequenceNumCommands; // for uniquely identifying commands
-  private int sequenceNumQueries; // for de-duplicating queries
   private Result result; // for getResult()
 
   /* -----------------------------------------------------------------------------------------------
@@ -34,7 +34,6 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
     super(address, shardMasters, numShards);
     this.shardConfigLatest = null;
     this.sequenceNumCommands = 0;
-    this.sequenceNumQueries = 0;
   }
 
   @Override
@@ -89,19 +88,14 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
   // for queries
   private synchronized void handlePaxosReply(PaxosReply m, Address sender) {
     AMOResult amoResult = m.result();
+    // ignore errors from ShardMaster
+    if (amoResult.result() instanceof Error) {
+      return;
+    }
+    ShardConfig shardConfigNew = (ShardConfig) amoResult.result();
 
-    if (amoResult.sequenceNum() == this.sequenceNumQueries) {
-      // ignore errors from ShardMaster
-      if (amoResult.result() instanceof Error) {
-        this.sequenceNumQueries++;
-        return;
-      }
-      
-      ShardConfig shardConfigNew = (ShardConfig) amoResult.result();
-      assertWithMessage(this.shardConfigLatest == null || this.shardConfigLatest.configNum() <= shardConfigNew.configNum(),
-                        "ShardClient.handlePaxosReply: new config must be at least as large as this client's latest config");
+    if (this.shardConfigLatest == null || this.shardConfigLatest.configNum() < shardConfigNew.configNum()) {
       this.shardConfigLatest = shardConfigNew;
-      this.sequenceNumQueries++;
     }
   }
 
@@ -151,7 +145,7 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
   private void sendQueryShardMasters() {
     Query query = new Query(-1);
     broadcast(
-        new PaxosRequest(new AMOCommand(query, this.address(), this.sequenceNumQueries)),
+        new PaxosRequest(new AMOCommand(query, this.address(), ShardStoreServer.SEQNUM_DONTCARE)),
         this.shardMasters()
     );
   }

@@ -33,7 +33,7 @@ public class ShardStoreServer extends ShardStoreNode {
   private final int groupId;
   private final int numTotalShards;
 
-  private static final int SEQNUM_DONTCARE = -2;
+  public static final int SEQNUM_DONTCARE = -2;
 
   private static final String PAXOS_ADDRESS_ID = "paxos";
   private Address paxosAddress;
@@ -112,7 +112,8 @@ public class ShardStoreServer extends ShardStoreNode {
     assertWithThrow(m.command().command() instanceof SingleKeyCommand, "S3.handleShardStoreRequest: client req not single key command");
 
     if (isReconfigOngoing()) {
-      this.commandsRejectedDuringReconfig.add(m.command());
+      // TODO: should put this inside processSingleKeyCommand
+      // this.commandsRejectedDuringReconfig.add(m.command());
       return;
     }
 
@@ -136,14 +137,28 @@ public class ShardStoreServer extends ShardStoreNode {
   private void handleShardStoreShardMove(ShardStoreShardMove m, Address sender) {
     if (this.shardConfigLatest == null) {
       return; // wait for ShardMaster first query result first before changing config
-    } else if (m.shardMove().configNum() != this.shardConfigLatest.configNum()) {
-      return; // do not process move with different config num
-    } else if (!this.reconfigMovesNeeded.containsKey(m.shardMove().groupIdSender())) {
-      return; // already received the move (or reconfig is not ongoing)
+    } else if (m.shardMove().configNum() > this.shardConfigLatest.configNum()) {
+      return; // do not process move with higher config num
     }
 
-    // TODO: be careful about processing a ShardMove message while reconfiguration is not ongoing, or reconfiguration is ongoing for losing shards (the last two elifs handle this)
-    // TODO: optimize sending back ack
+    // at this point, the config num in the message must be at most
+    // as large as the config num in the latest configuration
+
+    // if already processed the ShardMove, send back a redundant ack (with the sender's config num)
+    if (m.shardMove().configNum() < this.shardConfigLatest.configNum() || !isReconfigOngoing()) {
+      broadcast(new ShardStoreShardMoveAck(
+            new ShardMoveAck(this.groupId, m.shardMove().configNum(), m.shardMove().amoAppShards())
+          ),
+          getServersForGroupId(this.shardConfigLatest, m.shardMove().groupIdSender())
+      );
+      // TODO: the sending group may have left in latest configuration, but is far behind
+      //       (so this server does not know who to send to)
+      return;
+    }
+
+    if (!this.reconfigMovesNeeded.containsKey(m.shardMove().groupIdSender())) {
+      return; // already received the move (or reconfig is not ongoing)
+    }
 
     process(wrapInDummyAMO(m.shardMove()), false);
   }
@@ -185,9 +200,6 @@ public class ShardStoreServer extends ShardStoreNode {
     // send reconfiguration request to paxos subnode
     if (shardConfigNew.configNum() == getConfigNumForQuery()) {
       // bunch of assertions
-      assertWithThrow(shardConfigNew.configNum() == amoResult.sequenceNum(),
-                      "S3.handlePaxosReply: config num=" + shardConfigNew.configNum() + " should be same as seq num=" + amoResult.sequenceNum());
-
       if (this.shardConfigLatest == null) {
         assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM,
                         "S3.handlePaxosReply: empty config but first query returns non-initial config num");
@@ -392,11 +404,11 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // Plan:
     //  Timer Stuff:
-    //    1. Change up the timer so that the first if conditional is an assertion
-    //    2. In ShardMoveAck message, send back an ack if the config num is smaller or reconfig is no longer ongoing
+    //    1. Change up the timer so that the first if conditional is an assertion ✔
+    //    2. In ShardMoveAck message, send back an ack if the config num is smaller or reconfig is no longer ongoing ✔
     //  Error Config:
-    //    1. Handle read-only commands in PaxosServer (if alreadyExecuted() and readOnly(), then executeReadOnly())
-    //    2. May not need to increment sequence number in the client
+    //    1. Handle read-only commands in PaxosServer (if alreadyExecuted() and readOnly(), then executeReadOnly()) ✔
+    //    2. May not need to increment sequence number in the client ✔
     //  CommandsRejectedDuringReconfig:
     //    1. Change this to move to processSingleKeyCommand (execute decisions missed)
     //    2. Change processRejectedCommands() to have `isReplicated=true`
@@ -491,9 +503,8 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private synchronized void onResendShardMovesTimer(ResendShardMovesTimer t) {
-    if (this.shardConfigLatest == null || t.configNum() > this.shardConfigLatest.configNum()) {
-      return;
-    }
+    assertWithThrow(this.shardConfigLatest != null && this.shardConfigLatest.configNum() >= t.configNum(),
+                    "S3.onResendShardMovesTimer: this server's config num is incorrectly behind timer");
 
     if (t.configNum() < this.shardConfigLatest.configNum() || !isReconfigOngoing()) {
       return;
@@ -536,7 +547,7 @@ public class ShardStoreServer extends ShardStoreNode {
     Query query = new Query(getConfigNumForQuery());
     // use config number as sequence number
     broadcast(
-        new PaxosRequest(new AMOCommand(query, this.address(), getConfigNumForQuery())),
+        new PaxosRequest(new AMOCommand(query, this.address(), SEQNUM_DONTCARE)),
         this.shardMasters()
     );
   }
@@ -554,7 +565,7 @@ public class ShardStoreServer extends ShardStoreNode {
   private void assertWithThrow(boolean b, String m) {
     if (!b) {
       System.out.println(m);
-      throw new AssertionError();
+      System.exit(1);
     }
   }
 }

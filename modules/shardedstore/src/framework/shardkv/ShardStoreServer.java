@@ -301,6 +301,8 @@ public class ShardStoreServer extends ShardStoreNode {
 
   private void processSingleKeyCommand(@NonNull AMOCommand amoCommand, boolean isReplicated) {
     assertWithThrow(amoCommand.command() instanceof SingleKeyCommand, "S3.processSingleKeyCommand: called with wrong command type");
+
+    // TODO: need to handle this (CommandsRejectedDuringReconfig)
     assertWithThrow(!isReconfigOngoing(), "S3.processSingleKeyCommand: reconfig ongoing case");
 
     // check if this group is managing the shard
@@ -387,6 +389,17 @@ public class ShardStoreServer extends ShardStoreNode {
     assertWithThrow(this.shardConfigLatest != null,  "S3.setupReconfigDS: null latest config");
     assertWithThrow(shardConfigNew.configNum() == this.shardConfigLatest.configNum() + 1, "S3.setupReconfigDS: config in new should be one larger");
     assertWithThrow(!isReconfigOngoing(), "S3.setupReconfigDS: reconfig ongoing but decision for another reconfig being processed");
+
+    // Plan:
+    //  Timer Stuff:
+    //    1. Change up the timer so that the first if conditional is an assertion
+    //    2. In ShardMoveAck message, send back an ack if the config num is smaller or reconfig is no longer ongoing
+    //  Error Config:
+    //    1. Handle read-only commands in PaxosServer (if alreadyExecuted() and readOnly(), then executeReadOnly())
+    //    2. May not need to increment sequence number in the client
+    //  CommandsRejectedDuringReconfig:
+    //    1. Change this to move to processSingleKeyCommand (execute decisions missed)
+    //    2. Change processRejectedCommands() to have `isReplicated=true`
 
     Set<Integer> shardsThisGroupOldConfig = getShards(this.shardConfigLatest, this.groupId);
     Set<Integer> shardsThisGroupNewConfig = getShards(shardConfigNew, this.groupId);

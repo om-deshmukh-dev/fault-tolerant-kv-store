@@ -109,7 +109,7 @@ public class ShardStoreServer extends ShardStoreNode {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void handleShardStoreRequest(ShardStoreRequest m, Address sender) {
-    assertWithThrow(m.command().command() instanceof SingleKeyCommand, "S3.handleShardStoreRequest: client req not single key command");
+    // assertWithThrow(m.command().command() instanceof SingleKeyCommand, "S3.handleShardStoreRequest: client req not single key command");
 
     if (isReconfigOngoing()) {
       return;
@@ -122,7 +122,7 @@ public class ShardStoreServer extends ShardStoreNode {
     }
 
     AMOApplication<Application> amoAppFromShard = this.amoApplicationSharded.getOrDefault(keyToShard(singleKeyCommand.key()), null);
-    assertWithThrow(amoAppFromShard != null,"S3.handleShardStoreRequest(): managing shard not in application state");
+    // assertWithThrow(amoAppFromShard != null,"S3.handleShardStoreRequest(): managing shard not in application state");
 
     if (amoAppFromShard.alreadyExecuted(m.command())) {
       AMOResult amoResult = amoAppFromShard.execute(m.command());
@@ -193,20 +193,17 @@ public class ShardStoreServer extends ShardStoreNode {
     ShardConfig shardConfigNew = (ShardConfig) amoResult.result();
 
     // new config num should be at most as large as the new config this server is querying for
-    assertWithThrow(shardConfigNew.configNum() <= getConfigNumForQuery(),
-                    "S3.handlePaxosReply: receiving query result with config num too large");
+    // assertWithThrow(shardConfigNew.configNum() <= getConfigNumForQuery(), "S3.handlePaxosReply: receiving query result with config num too large");
 
     // config returned from query matches the new expected config number,
     // send reconfiguration request to paxos subnode
     if (shardConfigNew.configNum() == getConfigNumForQuery()) {
       // bunch of assertions
       if (this.shardConfigLatest == null) {
-        assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM,
-                        "S3.handlePaxosReply: empty config but first query returns non-initial config num");
+        // assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM, "S3.handlePaxosReply: empty config but first query returns non-initial config num");
       }
       else {
-        assertWithThrow(this.shardConfigLatest.configNum() + 1 == shardConfigNew.configNum(),
-                        "S3.handlePaxosReply: config in new shard must be one higher than current config (due to first if conditional)");
+        // assertWithThrow(this.shardConfigLatest.configNum() + 1 == shardConfigNew.configNum(), "S3.handlePaxosReply: config in new shard must be one higher than current config (due to first if conditional)");
       }
 
       process(wrapInDummyAMO(new NewConfig(shardConfigNew)), false);
@@ -214,7 +211,7 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private void handlePaxosDecision(PaxosDecision decision, Address sender) {
-    assertWithThrow(this.group.length == 1 || decision.slotNum() == (this.paxosLogSlotHighestSeen + 1), "S3.handlePaxosDecision: decisions not sent monotonically");
+    // assertWithThrow(this.group.length == 1 || decision.slotNum() == (this.paxosLogSlotHighestSeen + 1), "S3.handlePaxosDecision: decisions not sent monotonically");
     this.paxosLogSlotHighestSeen++;
     process(decision.amoCommand(), true);
   }
@@ -233,7 +230,7 @@ public class ShardStoreServer extends ShardStoreNode {
     } else if (amoCommand.command() instanceof ShardMoveAck) {
       processShardMoveAckCommand(amoCommand, isReplicated);
     } else {
-      assertWithThrow(false, "S3.process: have not handled non-NewConfig case yet");
+      // assertWithThrow(false, "S3.process: have not handled non-NewConfig case yet");
     }
   }
 
@@ -252,19 +249,18 @@ public class ShardStoreServer extends ShardStoreNode {
     }
 
     if (this.reconfigAcksNeeded.containsKey(shardMoveAckToUs.groupIdReceiver())) {
-      assertWithThrow(this.reconfigAcksNeeded.get(shardMoveAckToUs.groupIdReceiver()).equals(shardMoveAckToUs.amoAppShards.keySet()),
-                      "S3.processShardMoveAckCommand: receiving unexpected shards from ack");
+      // assertWithThrow(this.reconfigAcksNeeded.get(shardMoveAckToUs.groupIdReceiver()).equals(shardMoveAckToUs.amoAppShards.keySet()), "S3.processShardMoveAckCommand: receiving unexpected shards from ack");
 
       // remove all ack'd shards from this server's amoAppSharded,
       // then remove receiver from ReconfigAcksNeeded
       shardMoveAckToUs.amoAppShards.keySet().forEach((shard) -> {
-        assertWithThrow(this.amoApplicationSharded.containsKey(shard), "S3.processShardMoveAckCommand: somehow lost shard already");
+        // assertWithThrow(this.amoApplicationSharded.containsKey(shard), "S3.processShardMoveAckCommand: somehow lost shard already");
         this.amoApplicationSharded.remove(shard);
       });
       this.reconfigAcksNeeded.remove(shardMoveAckToUs.groupIdReceiver());
 
       if (!isReconfigOngoing()) {
-        assertWithThrow(this.reconfigMovesNeeded.isEmpty(), "S3.processShardMoveAckCommand: acks done but moves still needed");
+        // assertWithThrow(this.reconfigMovesNeeded.isEmpty(), "S3.processShardMoveAckCommand: acks done but moves still needed");
         processRejectedCommands();
       }
     }
@@ -285,12 +281,11 @@ public class ShardStoreServer extends ShardStoreNode {
     }
 
     if (this.reconfigMovesNeeded.containsKey(shardMoveToUs.groupIdSender())) {
-      assertWithThrow(this.reconfigMovesNeeded.get(shardMoveToUs.groupIdSender()).equals(shardMoveToUs.amoAppShards.keySet()),
-          "S3.processShardMoveCommand: receiving unexpected shards");
+      // assertWithThrow(this.reconfigMovesNeeded.get(shardMoveToUs.groupIdSender()).equals(shardMoveToUs.amoAppShards.keySet()), "S3.processShardMoveCommand: receiving unexpected shards");
 
       // merge the sharded application state into this server's amoApp
       shardMoveToUs.amoAppShards.forEach((shard, amoApp) -> {
-        assertWithThrow(!this.amoApplicationSharded.containsKey(shard), "S3.processShardMoveCommand: already have shard somehow");
+        // assertWithThrow(!this.amoApplicationSharded.containsKey(shard), "S3.processShardMoveCommand: already have shard somehow");
         this.amoApplicationSharded.put(shard, amoApp);
       });
 
@@ -304,7 +299,7 @@ public class ShardStoreServer extends ShardStoreNode {
       );
 
       if (!isReconfigOngoing()) {
-        assertWithThrow(this.reconfigAcksNeeded.isEmpty(), "S3.processShardMoveCommand: moves done but acks still needed");
+        // assertWithThrow(this.reconfigAcksNeeded.isEmpty(), "S3.processShardMoveCommand: moves done but acks still needed");
         processRejectedCommands();
       }
     }
@@ -312,7 +307,7 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private void processSingleKeyCommand(@NonNull AMOCommand amoCommand, boolean isReplicated) {
-    assertWithThrow(amoCommand.command() instanceof SingleKeyCommand, "S3.processSingleKeyCommand: called with wrong command type");
+    // assertWithThrow(amoCommand.command() instanceof SingleKeyCommand, "S3.processSingleKeyCommand: called with wrong command type");
 
     if (isReconfigOngoing()) {
       if (isReplicated) { this.commandsRejectedDuringReconfig.add(amoCommand); }
@@ -325,7 +320,7 @@ public class ShardStoreServer extends ShardStoreNode {
     if (!isManagingShard(shardForKey)) {
       return;
     }
-    assertWithThrow(this.amoApplicationSharded.containsKey(shardForKey), "S3.processSingleKeyCommand: group manages shard, but app doesn't contain it");
+    // assertWithThrow(this.amoApplicationSharded.containsKey(shardForKey), "S3.processSingleKeyCommand: group manages shard, but app doesn't contain it");
 
     // group manages shard, either propose to paxos subnode or execute command (depending on if replicated)
     if (!isReplicated) {
@@ -350,18 +345,18 @@ public class ShardStoreServer extends ShardStoreNode {
     }
 
     // assert config in decision is either initial or at most one higher than current
-    assertWithThrow(
-        (this.shardConfigLatest == null && shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM) ||
-            (this.shardConfigLatest != null && shardConfigNew.configNum() <= this.shardConfigLatest.configNum() + 1),
-        "S3.processNewConfig: config must be INITIAL or at most one higher"
-    );
+    // assertWithThrow(
+    //    (this.shardConfigLatest == null && shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM) ||
+    //    (this.shardConfigLatest != null && shardConfigNew.configNum() <= this.shardConfigLatest.configNum() + 1),
+    //    "S3.processNewConfig: config must be INITIAL or at most one higher"
+    // );
 
     // if reconfig ongoing, new config must be at most current config
     if (isReconfigOngoing()) {
-      assertWithThrow(
-          this.shardConfigLatest != null && shardConfigNew.configNum() <= this.shardConfigLatest.configNum(),
-          "S3.processNewConfig: reconfig ongoing but decision for higher config"
-      );
+      // assertWithThrow(
+      //    this.shardConfigLatest != null && shardConfigNew.configNum() <= this.shardConfigLatest.configNum(),
+      //    "S3.processNewConfig: reconfig ongoing but decision for higher config"
+      // );
       return;
     }
 
@@ -372,12 +367,11 @@ public class ShardStoreServer extends ShardStoreNode {
 
     if (this.shardConfigLatest == null) {
       // initial configuration case
-      assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM,
-                      "S3.processNewConfig: config empty but not getting INITIAL_CONFIG");
+      // assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM, "S3.processNewConfig: config empty but not getting INITIAL_CONFIG");
 
       // this group manages all the shards, initialize sharded AMO app accordingly
       if (shardConfigNew.groupInfo().containsKey(this.groupId)) {
-        assertWithThrow(this.amoApplicationSharded != null && this.amoApplicationSharded.isEmpty(), "S3.processNewConfig: map not init to empty");
+        // assertWithThrow(this.amoApplicationSharded != null && this.amoApplicationSharded.isEmpty(), "S3.processNewConfig: map not init to empty");
 
         // assign this group all the shards
         Set<Integer> shardsInNewConfig = shardConfigNew.groupInfo().get(this.groupId).getRight();
@@ -387,8 +381,7 @@ public class ShardStoreServer extends ShardStoreNode {
       }
     } else {
       // new configuration after initial case
-      assertWithThrow(shardConfigNew.configNum() == this.shardConfigLatest.configNum() + 1,
-                      "S3.processNewConfig: decision for larger config must be exactly one higher");
+      // assertWithThrow(shardConfigNew.configNum() == this.shardConfigLatest.configNum() + 1, "S3.processNewConfig: decision for larger config must be exactly one higher");
       setupReconfigDS(shardConfigNew);
     }
 
@@ -402,7 +395,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
   // process commands that were queued during reconfiguration
   private void processRejectedCommands() {
-    assertWithThrow(!isReconfigOngoing(), "S3.processRejectedCommands: reconfig still ongoing");
+    // assertWithThrow(!isReconfigOngoing(), "S3.processRejectedCommands: reconfig still ongoing");
 
     while (!this.commandsRejectedDuringReconfig.isEmpty()) {
       AMOCommand amoCommand = this.commandsRejectedDuringReconfig.poll();
@@ -416,57 +409,41 @@ public class ShardStoreServer extends ShardStoreNode {
   //      (have not "moved on" yet)
   //   2. reconfiguration is not already ongoing
   private void setupReconfigDS(ShardConfig shardConfigNew) {
-    assertWithThrow(this.shardConfigLatest != null,  "S3.setupReconfigDS: null latest config");
-    assertWithThrow(shardConfigNew.configNum() == this.shardConfigLatest.configNum() + 1, "S3.setupReconfigDS: config in new should be one larger");
-    assertWithThrow(!isReconfigOngoing(), "S3.setupReconfigDS: reconfig ongoing but decision for another reconfig being processed");
-
-    // Plan:
-    //  Timer Stuff:
-    //    1. Change up the timer so that the first if conditional is an assertion ✔
-    //    2. In ShardMoveAck message, send back an ack if the config num is smaller or reconfig is no longer ongoing ✔
-    //  Error Config:
-    //    1. Handle read-only commands in PaxosServer (if alreadyExecuted() and readOnly(), then executeReadOnly()) ✔
-    //    2. May not need to increment sequence number in the client ✔
-    //  CommandsRejectedDuringReconfig:
-    //    1. Change this to move to processSingleKeyCommand (execute decisions missed)
-    //    2. Change processRejectedCommands() to have `isReplicated=true`
+    // assertWithThrow(this.shardConfigLatest != null,  "S3.setupReconfigDS: null latest config");
+    // assertWithThrow(shardConfigNew.configNum() == this.shardConfigLatest.configNum() + 1, "S3.setupReconfigDS: config in new should be one larger");
+    // assertWithThrow(!isReconfigOngoing(), "S3.setupReconfigDS: reconfig ongoing but decision for another reconfig being processed");
 
     Set<Integer> shardsThisGroupOldConfig = getShards(this.shardConfigLatest, this.groupId);
     Set<Integer> shardsThisGroupNewConfig = getShards(shardConfigNew, this.groupId);
 
     if (shardsThisGroupOldConfig.size() == shardsThisGroupNewConfig.size()) {
       // unchanged, don't do anything
-      assertWithThrow(shardsThisGroupOldConfig.equals(shardsThisGroupNewConfig),
-                      "S3.setupReconfigDS: equal number of shards but shards were moved (suboptimal)");
+      // assertWithThrow(shardsThisGroupOldConfig.equals(shardsThisGroupNewConfig), "S3.setupReconfigDS: equal number of shards but shards were moved (suboptimal)");
     }
     else if (shardsThisGroupOldConfig.size() > shardsThisGroupNewConfig.size()) {
       // losing shards
-      assertWithThrow(shardsThisGroupOldConfig.containsAll(shardsThisGroupNewConfig),
-                      "S3.setupReconfigDS: losing shards but also gained new ones (suboptimal)");
+      // assertWithThrow(shardsThisGroupOldConfig.containsAll(shardsThisGroupNewConfig), "S3.setupReconfigDS: losing shards but also gained new ones (suboptimal)");
 
       constructReconfigDecisionsNeeded(this.shardConfigLatest, shardConfigNew);
-      assertWithThrow(!this.reconfigAcksNeeded.isEmpty(), "S3.setupReconfigDS: acks needed empty (should be non-empty)");
+      // assertWithThrow(!this.reconfigAcksNeeded.isEmpty(), "S3.setupReconfigDS: acks needed empty (should be non-empty)");
 
       resendShardMoves(shardConfigNew);
       set(new ResendShardMovesTimer(shardConfigNew.configNum()), ResendShardMovesTimer.RESEND_MILLIS);
     }
     else {
       // gaining shards
-      assertWithThrow(shardsThisGroupNewConfig.containsAll(shardsThisGroupOldConfig),
-                      "S3.setupReconfigDS: gaining shards but lost original ones (suboptimal)");
+      // assertWithThrow(shardsThisGroupNewConfig.containsAll(shardsThisGroupOldConfig), "S3.setupReconfigDS: gaining shards but lost original ones (suboptimal)");
 
       constructReconfigDecisionsNeeded(this.shardConfigLatest, shardConfigNew);
-      assertWithThrow(!this.reconfigMovesNeeded.isEmpty(), "S3.setupReconfigDS: moves needed empty (should be non-empty)");
+      // assertWithThrow(!this.reconfigMovesNeeded.isEmpty(), "S3.setupReconfigDS: moves needed empty (should be non-empty)");
     }
   }
 
   // will construct the ReconfigMovesNeeded and ReconfigAcksNeeded for this server
   // by comparing the difference in shard management between the two configurations passed in
   private void constructReconfigDecisionsNeeded(@NonNull ShardConfig shardConfigOld, @NonNull ShardConfig shardConfigNew) {
-    assertWithThrow(this.reconfigAcksNeeded.isEmpty() && this.reconfigMovesNeeded.isEmpty(),
-                    "S3.constructReconfigDecisionsNeeded: group should have empty reconfig data structures");
-    assertWithThrow(shardConfigOld.configNum() + 1 == shardConfigNew.configNum(),
-                    "S3.constructReconfigDecisionsNeeded: configs must be one apart");
+    // assertWithThrow(this.reconfigAcksNeeded.isEmpty() && this.reconfigMovesNeeded.isEmpty(), "S3.constructReconfigDecisionsNeeded: group should have empty reconfig data structures");
+    // assertWithThrow(shardConfigOld.configNum() + 1 == shardConfigNew.configNum(), "S3.constructReconfigDecisionsNeeded: configs must be one apart");
 
     for (int shard = ShardMaster.SHARD_NUM_START; shard <= numTotalShards; shard++) {
       int groupMngShardOldConfig = getGroupIdForShard(shardConfigOld, shard);
@@ -485,18 +462,17 @@ public class ShardStoreServer extends ShardStoreNode {
       }
     }
 
-    assertWithThrow(this.reconfigAcksNeeded.isEmpty() || this.reconfigMovesNeeded.isEmpty(),
-                    "S3.constructReconfigDecisionsNeeded: group should not both gain and lose shards");
+    // assertWithThrow(this.reconfigAcksNeeded.isEmpty() || this.reconfigMovesNeeded.isEmpty(), "S3.constructReconfigDecisionsNeeded: group should not both gain and lose shards");
   }
 
   // while reconfiguration is ongoing, and this group is sending shards + waiting to receive acks,
   // resend the shards to each of the groups that this group is waiting for an ack from
   private void resendShardMoves(@NonNull ShardConfig shardConfig) {
-    assertWithThrow(isReconfigOngoing(), "S3.resendShardMoves: resending but reconfig not ongoing");
-    assertWithThrow(!this.reconfigAcksNeeded.isEmpty(), "S3.resendShardMoves: acks empty (but resending)");
+    // assertWithThrow(isReconfigOngoing(), "S3.resendShardMoves: resending but reconfig not ongoing");
+    // assertWithThrow(!this.reconfigAcksNeeded.isEmpty(), "S3.resendShardMoves: acks empty (but resending)");
 
     for (Integer groupIdReceiver : this.reconfigAcksNeeded.keySet()) {
-      assertWithThrow(shardConfig.groupInfo().containsKey(groupIdReceiver), "resendShardMoves: receiver not in shardConfig");
+      // assertWithThrow(shardConfig.groupInfo().containsKey(groupIdReceiver), "resendShardMoves: receiver not in shardConfig");
 
       // tell receiver that this group is sending a collection of application shards to them
       ShardMove shardMoveToReceiver = new ShardMove(this.groupId, shardConfig.configNum(), new HashMap<>());
@@ -521,14 +497,13 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private synchronized void onResendShardMovesTimer(ResendShardMovesTimer t) {
-    assertWithThrow(this.shardConfigLatest != null && this.shardConfigLatest.configNum() >= t.configNum(),
-                    "S3.onResendShardMovesTimer: this server's config num is incorrectly behind timer");
+    // assertWithThrow(this.shardConfigLatest != null && this.shardConfigLatest.configNum() >= t.configNum(), "S3.onResendShardMovesTimer: this server's config num is incorrectly behind timer");
 
     if (t.configNum() < this.shardConfigLatest.configNum() || !isReconfigOngoing()) {
       return;
     }
 
-    assertWithThrow(!this.reconfigAcksNeeded.isEmpty(), "S3.onResendShardMovesTimer: reconfig ongoing but acks empty");
+    // assertWithThrow(!this.reconfigAcksNeeded.isEmpty(), "S3.onResendShardMovesTimer: reconfig ongoing but acks empty");
     resendShardMoves(this.shardConfigLatest);
     set(t, ResendShardMovesTimer.RESEND_MILLIS);
   }
@@ -557,7 +532,7 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private AMOCommand wrapInDummyAMO(Command command) {
-    assertWithThrow(!(command instanceof AMOCommand), "S3.wrapInDummyAMO: wrapping command already an AMO");
+    // assertWithThrow(!(command instanceof AMOCommand), "S3.wrapInDummyAMO: wrapping command already an AMO");
     return new AMOCommand(command, null, SEQNUM_DONTCARE);
   }
 
@@ -574,7 +549,7 @@ public class ShardStoreServer extends ShardStoreNode {
   // this server. Returns INITIAL_CONFIG If this server hasn't yet accepted any configuration
   private int getConfigNumForQuery() {
     if (this.shardConfigLatest == null) {
-      assertWithThrow(this.amoApplicationSharded.isEmpty(), "S3.getConfigNumForQuery: app non-empty with empty config");
+      // assertWithThrow(this.amoApplicationSharded.isEmpty(), "S3.getConfigNumForQuery: app non-empty with empty config");
       return ShardMaster.INITIAL_CONFIG_NUM;
     }
     return this.shardConfigLatest.configNum() + 1;

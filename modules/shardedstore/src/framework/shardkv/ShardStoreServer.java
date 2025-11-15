@@ -135,26 +135,43 @@ public class ShardStoreServer extends ShardStoreNode {
 
   private void handleShardStoreShardMove(ShardStoreShardMove m, Address sender) {
     if (this.shardConfigLatest == null) {
-      return; // wait for ShardMaster first query result first before changing config
-    } else if (m.shardMove().configNum() != this.shardConfigLatest.configNum()) {
-      return; // do not process move with different config num
-    } else if (!this.reconfigMovesNeeded.containsKey(m.shardMove().groupIdSender())) {
-      return; // already received the move (or reconfig is not ongoing)
+      return; // wait for ShardMaster query result first
+    }
+    
+    if (m.shardMove().configNum() > this.shardConfigLatest.configNum()) {
+      return; // wait for query result for this config
+    }
+    
+    if (m.shardMove().configNum() < this.shardConfigLatest.configNum() ||
+        !this.reconfigMovesNeeded.containsKey(m.shardMove().groupIdSender())) {
+      // already received the move, send ack back to sender
+      send(
+          new ShardStoreShardMoveAck(
+              new ShardMoveAck(this.groupId, m.shardMove().configNum(), m.shardMove().amoAppShards())
+          ),
+          sender
+      );
+      return;
     }
 
     // TODO: be careful about processing a ShardMove message while reconfiguration is not ongoing, or reconfiguration is ongoing for losing shards (the last two elifs handle this)
     // TODO: optimize sending back ack
 
+    // reconfig ongoing, move for current config, sender is expected
     process(wrapInDummyAMO(m.shardMove()), false);
   }
 
   private void handleShardStoreShardMoveAck(ShardStoreShardMoveAck m, Address sender) {
     if (this.shardConfigLatest == null) {
       return; // other members of group are far ahead
-    } else if (m.shardMoveAck().configNum() != this.shardConfigLatest.configNum()) {
-      return; // ack is for different round of reconfiguration
-    } else if (!this.reconfigAcksNeeded.containsKey(m.shardMoveAck().groupIdReceiver())) {
-      return; // already received ack (or reconfig is not ongoing)
+    }
+    
+    if (m.shardMoveAck().configNum() != this.shardConfigLatest.configNum() || !isReconfigOngoing()) {
+      return; // ack is for different config or reconfig not ongoing
+    }
+    
+    if (!this.reconfigAcksNeeded.containsKey(m.shardMoveAck().groupIdReceiver())) {
+      return; // already received ack
     }
 
     // TODO: be careful about processing a ShardMoveAck message while reconfiguration is not ongoing, or reconfiguration is ongoing for gaining shards (the last two elifs handle this)
@@ -301,7 +318,12 @@ public class ShardStoreServer extends ShardStoreNode {
 
   private void processSingleKeyCommand(@NonNull AMOCommand amoCommand, boolean isReplicated) {
     assertWithThrow(amoCommand.command() instanceof SingleKeyCommand, "S3.processSingleKeyCommand: called with wrong command type");
-    assertWithThrow(!isReconfigOngoing(), "S3.processSingleKeyCommand: reconfig ongoing case");
+    // assertWithThrow(!isReconfigOngoing(), "S3.processSingleKeyCommand: reconfig ongoing case");
+
+    if (isReconfigOngoing()) {
+      this.commandsRejectedDuringReconfig.add(amoCommand);
+      return;
+    }
 
     // check if this group is managing the shard
     SingleKeyCommand singleKeyCommand = (SingleKeyCommand) amoCommand.command();
@@ -325,11 +347,27 @@ public class ShardStoreServer extends ShardStoreNode {
     ShardConfig shardConfigNew = ((NewConfig)amoCommand.command()).shardConfig();
 
     // TODO: may be able to assert that config in decision is at most one higher than current config
-    assertWithThrow(!isReconfigOngoing(), "S3.processNewConfig: handle reconfig case");
+    // assertWithThrow(!isReconfigOngoing(), "S3.processNewConfig: handle reconfig case");
 
     if (!isReplicated) {
       // TODO: add assertions here
       handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
+      return;
+    }
+
+    // assert config in decision is either initial or at most one higher than current
+    assertWithThrow(
+        (this.shardConfigLatest == null && shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM) ||
+        (this.shardConfigLatest != null && shardConfigNew.configNum() <= this.shardConfigLatest.configNum() + 1),
+        "S3.processNewConfig: config must be INITIAL or at most one higher"
+    );
+
+    // if reconfig ongoing, new config must be at most current config
+    if (isReconfigOngoing()) {
+      assertWithThrow(
+          this.shardConfigLatest != null && shardConfigNew.configNum() <= this.shardConfigLatest.configNum(),
+          "S3.processNewConfig: reconfig ongoing but decision for higher config"
+      );
       return;
     }
 
@@ -374,7 +412,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
     while (!this.commandsRejectedDuringReconfig.isEmpty()) {
       AMOCommand amoCommand = this.commandsRejectedDuringReconfig.poll();
-      process(amoCommand, false);
+      process(amoCommand, true);
     }
   }
 

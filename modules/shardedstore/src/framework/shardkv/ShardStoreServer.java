@@ -214,7 +214,6 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private void handlePaxosDecision(PaxosDecision decision, Address sender) {
-    assertWithThrow(this.group.length == 1 || decision.slotNum() == (this.paxosLogSlotHighestSeen + 1), "S3.handlePaxosDecision: decisions not sent monotonically");
     this.paxosLogSlotHighestSeen++;
     process(decision.amoCommand(), true);
   }

@@ -109,27 +109,7 @@ public class ShardStoreServer extends ShardStoreNode {
    *  Message Handlers
    * ---------------------------------------------------------------------------------------------*/
   private void handleShardStoreRequest(ShardStoreRequest m, Address sender) {
-    assertWithThrow(m.command().command() instanceof SingleKeyCommand, "S3.handleShardStoreRequest: client req not single key command");
-
-    if (isReconfigOngoing()) {
-      return;
-    }
-
-    SingleKeyCommand singleKeyCommand = (SingleKeyCommand) m.command().command();
-    if (!isManagingShard(keyToShard(singleKeyCommand.key()))) {
-      // TODO: send an error back
-      return;
-    }
-
-    AMOApplication<Application> amoAppFromShard = this.amoApplicationSharded.getOrDefault(keyToShard(singleKeyCommand.key()), null);
-    assertWithThrow(amoAppFromShard != null,"S3.handleShardStoreRequest(): managing shard not in application state");
-
-    if (amoAppFromShard.alreadyExecuted(m.command())) {
-      AMOResult amoResult = amoAppFromShard.execute(m.command());
-      send(new ShardStoreReply(amoResult), sender);
-    } else {
-      process(m.command(), false);
-    }
+    process(m.command(), false);
   }
 
   private void handleShardStoreShardMove(ShardStoreShardMove m, Address sender) {
@@ -324,7 +304,14 @@ public class ShardStoreServer extends ShardStoreNode {
     if (!isManagingShard(shardForKey)) {
       return;
     }
-    assertWithThrow(this.amoApplicationSharded.containsKey(shardForKey), "S3.processSingleKeyCommand: group manages shard, but app doesn't contain it");
+
+    // check if this group has already executed the command
+    AMOApplication<Application> amoAppFromShard = this.amoApplicationSharded.get(keyToShard(singleKeyCommand.key()));
+    if (amoAppFromShard.alreadyExecuted(amoCommand)) {
+      AMOResult amoResult = amoAppFromShard.execute(amoCommand);
+      send(new ShardStoreReply(amoResult), amoCommand.address());
+      return;
+    }
 
     // group manages shard, either propose to paxos subnode or execute command (depending on if replicated)
     if (!isReplicated) {

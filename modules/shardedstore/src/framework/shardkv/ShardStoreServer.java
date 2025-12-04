@@ -1,13 +1,27 @@
 package framework.shardkv;
 
 import framework.atmostonce.AMOApplication;
+import framework.atmostonce.AMOApplication.AMOExecution;
 import framework.atmostonce.AMOCommand;
 import framework.atmostonce.AMOResult;
 import framework.Address;
 import framework.Application;
 import framework.Command;
+import framework.Result;
 import framework.kvstore.KVStore;
+import framework.kvstore.KVStore.Get;
+import framework.kvstore.KVStore.GetResult;
+import framework.kvstore.KVStore.KVStoreResult;
+import framework.kvstore.KVStore.Put;
 import framework.kvstore.KVStore.SingleKeyCommand;
+import framework.kvstore.TransactionalKVStore;
+import framework.kvstore.TransactionalKVStore.MultiGet;
+import framework.kvstore.TransactionalKVStore.MultiGetResult;
+import framework.kvstore.TransactionalKVStore.MultiPut;
+import framework.kvstore.TransactionalKVStore.MultiPutOk;
+import framework.kvstore.TransactionalKVStore.Swap;
+import framework.kvstore.TransactionalKVStore.SwapOk;
+import framework.kvstore.TransactionalKVStore.Transaction;
 import framework.paxos.PaxosDecision;
 import framework.paxos.PaxosReply;
 import framework.paxos.PaxosRequest;
@@ -15,6 +29,7 @@ import framework.paxos.PaxosServer;
 import framework.shardmaster.ShardMaster;
 import framework.shardmaster.ShardMaster.Query;
 import framework.shardmaster.ShardMaster.ShardConfig;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -40,6 +55,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
   private final HashMap<Integer, AMOApplication<Application>> amoApplicationSharded;
   private ShardConfig shardConfigLatest;
+  private final HashMap<Address, AMOExecution> transactionsAlreadyExecuted;
 
   private final Map<Integer, Set<Integer>> reconfigMovesNeeded;
   private final Map<Integer, Set<Integer>> reconfigAcksNeeded;
@@ -77,6 +93,8 @@ public class ShardStoreServer extends ShardStoreNode {
 
     this.amoApplicationSharded = new HashMap<>();
     this.shardConfigLatest = null;
+    this.transactionsAlreadyExecuted = new HashMap<>();
+
     this.paxosLogSlotHighestSeen = PaxosServer.LOG_START - 1;
 
     this.reconfigMovesNeeded = new HashMap<>();
@@ -207,12 +225,14 @@ public class ShardStoreServer extends ShardStoreNode {
       processNewConfig(amoCommand, isReplicated);
     } else if (amoCommand.command() instanceof SingleKeyCommand) {
       processSingleKeyCommand(amoCommand, isReplicated);
+    } else if (amoCommand.command() instanceof Transaction) {
+      processTransaction(amoCommand, isReplicated);
     } else if (amoCommand.command() instanceof ShardMove) {
       processShardMoveCommand(amoCommand, isReplicated);
     } else if (amoCommand.command() instanceof ShardMoveAck) {
       processShardMoveAckCommand(amoCommand, isReplicated);
     } else {
-      assertWithThrow(false, "S3.process: have not handled non-NewConfig case yet");
+      assertWithThrow(false, "S3.process: bad type");
     }
   }
 
@@ -300,8 +320,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // check if this group is managing the shard
     SingleKeyCommand singleKeyCommand = (SingleKeyCommand) amoCommand.command();
-    int shardForKey = keyToShard(singleKeyCommand.key());
-    if (!isManagingShard(shardForKey)) {
+    if (!isManagingCommand(singleKeyCommand)) {
       return;
     }
 
@@ -318,7 +337,45 @@ public class ShardStoreServer extends ShardStoreNode {
       handleMessage(new PaxosRequest(amoCommand), paxosAddress);
     } else {
       // execute the command and send result back to client
-      AMOResult amoResult = this.amoApplicationSharded.get(shardForKey).execute(amoCommand);
+      int shardContainingKey = keyToShard(singleKeyCommand.key());
+      AMOResult amoResult = this.amoApplicationSharded.get(shardContainingKey).execute(amoCommand);
+      send(new ShardStoreReply(amoResult), amoCommand.address());
+    }
+  }
+
+  private void processTransaction(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertWithThrow(amoCommand.command() instanceof Transaction, "S3.processTransaction: called with wrong command type");
+
+    if (isReconfigOngoing()) {
+      // TODO: think about this more
+      // if (isReplicated) { this.commandsRejectedDuringReconfig.add(amoCommand); }
+      return;
+    }
+
+    // check if this group is managing the transaction (coordinator)
+    Transaction transaction = (Transaction) amoCommand.command();
+    if (!isManagingCommand(transaction)) {
+      return;
+    }
+
+    // if the transaction has already been executed, then reply back to the client
+    if (isTxnAlreadyExecuted(amoCommand)) {
+      AMOExecution amoExecutionLatest = this.transactionsAlreadyExecuted.get(amoCommand.address());
+      send(new ShardStoreReply(amoExecutionLatest.amoResult()), amoCommand.address());
+      return;
+    }
+
+    // transaction not handled before, either propose or execute
+    if (!isReplicated) {
+      handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
+    } else {
+      assertWithThrow(getTransactionParticipants(transaction, this.shardConfigLatest).size() == 1,
+                      "S3.processTransaction: have not implemented cross-group txns (2PC)");
+
+      KVStoreResult kvStoreResult = transactionDecomposeAndExecute(amoCommand);
+      AMOResult amoResult = new AMOResult(kvStoreResult, amoCommand.sequenceNum());
+      this.transactionsAlreadyExecuted.put(amoCommand.address(), new AMOExecution(amoCommand, amoResult));
+
       send(new ShardStoreReply(amoResult), amoCommand.address());
     }
   }
@@ -368,7 +425,7 @@ public class ShardStoreServer extends ShardStoreNode {
         // assign this group all the shards
         Set<Integer> shardsInNewConfig = shardConfigNew.groupInfo().get(this.groupId).getRight();
         for (Integer shardNum : shardsInNewConfig) {
-          this.amoApplicationSharded.put(shardNum, new AMOApplication<>(new KVStore(), new HashMap<>()));
+          this.amoApplicationSharded.put(shardNum, new AMOApplication<>(new TransactionalKVStore(), new HashMap<>()));
         }
       }
     } else {
@@ -385,6 +442,79 @@ public class ShardStoreServer extends ShardStoreNode {
   /* -----------------------------------------------------------------------------------------------
    *  Core Helpers
    * ---------------------------------------------------------------------------------------------*/
+
+  // Decomposes a transaction into the set of MultiCommands associated with the keys this group
+  // manages, and executes the MultiCommands directly on the application (bypassing AMO logic).
+  // The aggregated results of the MultiCommands are returned as a single Transaction KVStoreResult
+  //
+  // Requires that either:
+  //  1. The transaction is fully contained in a single group, and a Transaction decision was made
+  //  2. The transaction is cross-group, and a COMMIT decision for an ongoing Transaction was received
+  private KVStoreResult transactionDecomposeAndExecute(@NonNull AMOCommand amoCommand) {
+    assertWithThrow(amoCommand.command() instanceof Transaction, "S3.transactionDecomposeAndExecute: called on non-txn");
+    assertWithThrow(this.shardConfigLatest != null, "S3.transactionDecomposeAndExecute: null config");
+    assertWithThrow(!isTxnAlreadyExecuted(amoCommand), "S3.transactionDecomposeAndExecute: already executed txn");
+
+    Transaction transaction = (Transaction) amoCommand.command();
+    assertWithThrow(getTransactionParticipants(transaction, this.shardConfigLatest).contains(this.groupId),
+                    "S3.transactionDecomposeAndExecute: executing txn, but not a participant in it");
+    assertWithThrow(transaction.keySet().stream().allMatch(key -> this.amoApplicationSharded.containsKey(keyToShard(key))),
+                    "S3.transactionDecomposeAndExecute: have not yet handled managing subset of keys");
+
+    if (transaction instanceof MultiGet multiGet) {
+      MultiGetResult multiGetResultAggregated = new MultiGetResult(new HashMap<>());
+
+      // bypass AMO logic to run MultiGet on the various transactional KVStore shards this group manages
+      for (String key : multiGet.keySet()) {
+        Application txnKVStoreShard = this.amoApplicationSharded.get(keyToShard(key)).application();
+        MultiGetResult multiGetResult = (MultiGetResult) txnKVStoreShard.execute(
+            new MultiGet(new HashSet<>(Collections.singleton(key)))
+        );
+        multiGetResultAggregated.values().putAll(multiGetResult.values());
+      }
+
+      return multiGetResultAggregated;
+
+    } else if (transaction instanceof MultiPut multiPut) {
+
+      for (String key : multiPut.keySet()) {
+        Application txnKVStoreShard = this.amoApplicationSharded.get(keyToShard(key)).application();
+
+        HashMap<String, String> multiPutShard = new HashMap<>();
+        multiPutShard.put(key, multiPut.values().get(key));
+        txnKVStoreShard.execute(new MultiPut(multiPutShard));
+      }
+
+      return new MultiPutOk();
+
+    } else if (transaction instanceof Swap swap) {
+      // TODO: need to fix this for cross-group swaps
+      if (keyToShard(swap.key1()) == keyToShard(swap.key2())) {
+        assertWithThrow(false, "S3.transactionDecomposeAndExecute: txn on same shard (not tested yet)");
+        // this.amoApplicationSharded.get(keyToShard(swap.key1())).application().execute(swap);
+      } else {
+        // swap across shards
+        Application txnKVStoreKey1 = this.amoApplicationSharded.get(keyToShard(swap.key1())).application();
+        Result resultKey1Get = txnKVStoreKey1.execute(new Get(swap.key1()));
+
+        Application txnKVStoreKey2 = this.amoApplicationSharded.get(keyToShard(swap.key2())).application();
+        Result resultKey2Get = txnKVStoreKey2.execute(new Get(swap.key2()));
+
+        // TODO: this implementation does not completely match the swap in TransactionalKVStore.java (no keys are deleted here)
+        if (resultKey1Get instanceof GetResult getResult) {
+          txnKVStoreKey2.execute(new Put(swap.key2(), getResult.value()));
+        }
+        if (resultKey2Get instanceof GetResult getResult) {
+          txnKVStoreKey1.execute(new Put(swap.key1(), getResult.value()));
+        }
+      }
+
+      return new SwapOk();
+    } else {
+      assertWithThrow(false, "S3.transactionDecomposeAndExecute: bad transaction");
+      return null;
+    }
+  }
 
   // process commands that were queued during reconfiguration
   private void processRejectedCommands() {
@@ -523,6 +653,20 @@ public class ShardStoreServer extends ShardStoreNode {
    *  Utils
    * ---------------------------------------------------------------------------------------------*/
 
+  private boolean isTxnAlreadyExecuted(@NonNull AMOCommand amoCommand) {
+    assertWithThrow(amoCommand.command() instanceof Transaction, "S3.isTxnAlreadyExecuted: cmd not txn");
+
+    if (!this.transactionsAlreadyExecuted.containsKey(amoCommand.address())) {
+      return false;
+    }
+
+    // transaction is already executed if the highest executed seq num
+    // is at least as large as the seq num in the command
+    return this.transactionsAlreadyExecuted.get(
+        amoCommand.address()
+    ).amoResult().sequenceNum() >= amoCommand.sequenceNum();
+  }
+
   // returns the set of shards that the group in the argument manages, or returns emptyset
   // if the group in the argument is not in the configuration passed in
   private Set<Integer> getShards(@NonNull ShardConfig shardConfig, int groupIdGetShards) {
@@ -536,10 +680,12 @@ public class ShardStoreServer extends ShardStoreNode {
     return (this.reconfigMovesNeeded.size() + this.reconfigAcksNeeded.size()) > 0;
   }
 
-  private boolean isManagingShard(int shardNum) {
-    return this.shardConfigLatest != null &&
-           this.shardConfigLatest.groupInfo().containsKey(this.groupId) &&
-           this.shardConfigLatest.groupInfo().get(this.groupId).getRight().contains(shardNum);
+  private boolean isManagingCommand(Command command) {
+    if (this.shardConfigLatest == null) {
+      return false;
+    }
+
+    return this.groupId == computeGroupManagingCommand(command, this.shardConfigLatest);
   }
 
   private AMOCommand wrapInDummyAMO(Command command) {

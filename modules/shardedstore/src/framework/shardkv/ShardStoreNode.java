@@ -1,8 +1,11 @@
 package framework.shardkv;
 
 import framework.Address;
+import framework.Command;
 import framework.Message;
 import framework.Node;
+import framework.kvstore.KVStore.SingleKeyCommand;
+import framework.kvstore.TransactionalKVStore.Transaction;
 import framework.shardmaster.ShardMaster;
 import framework.shardmaster.ShardMaster.ShardConfig;
 import java.util.Collections;
@@ -49,6 +52,36 @@ abstract class ShardStoreNode extends Node {
       return shardConfig.groupInfo().get(groupId).getLeft();
     }
     return new HashSet<>();
+  }
+
+  // The set of group IDs associated with the transaction
+  public Set<Integer> getTransactionParticipants(Transaction transaction, @NonNull ShardConfig shardConfig) {
+    HashSet<Integer> groupsInTransaction = new HashSet<>();
+
+    transaction.keySet().forEach(key -> {
+      groupsInTransaction.add(getGroupIdForShard(shardConfig, keyToShard(key)));
+    });
+    return groupsInTransaction;
+  }
+
+  // Compute the group to send the command to. The group selected depends on
+  // the current configuration and the type of command
+  //   SingleKeyCommand: Is just the group managing the shard that the command touches
+  //   MultiKeyCommand: Among all the groups managing the shards the command touches,
+  //                    find the group with the largest identifier
+  //
+  // This function assumes that the shard configuration is non-null
+  public int computeGroupManagingCommand(Command command, @NonNull ShardConfig shardConfig) {
+    if (command instanceof SingleKeyCommand singleKeyCommand) {
+      return getGroupIdForShard(shardConfig, keyToShard(singleKeyCommand.key()));
+    }
+    else if (command instanceof Transaction transaction) {
+      Set<Integer> groupsInTransaction = getTransactionParticipants(transaction, shardConfig);
+      return groupsInTransaction.stream().max(Integer::compareTo).get();
+    }
+    else {
+      return -1;
+    }
   }
 
   /**

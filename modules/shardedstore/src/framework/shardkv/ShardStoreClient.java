@@ -53,7 +53,7 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
     this.result = null;
 
     if (this.shardConfigLatest != null) {
-      sendRequestToGroupMembers(request, computeGroupManagingCommand(command));
+      sendRequestToGroupMembers(request, computeGroupManagingCommand(command, this.shardConfigLatest));
     }
 
     set(new ClientTimer(request), ClientTimer.CLIENT_RETRY_MILLIS);
@@ -112,9 +112,8 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
 
     // reset timer and broadcast request again for latest ongoing request
     if (t.request().command().sequenceNum() == this.sequenceNumCommands) {
-      int groupIdManagingShard = computeGroupManagingCommand(t.request().command().command());
-
-      sendRequestToGroupMembers(t.request(), groupIdManagingShard);
+      int groupIdManagingCmd = computeGroupManagingCommand(t.request().command().command(), this.shardConfigLatest);
+      sendRequestToGroupMembers(t.request(), groupIdManagingCmd);
       set(t, ClientTimer.CLIENT_RETRY_MILLIS);
     }
   }
@@ -127,34 +126,6 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
   /* -----------------------------------------------------------------------------------------------
    *  Helpers
    * ---------------------------------------------------------------------------------------------*/
-
-  // Compute the group to send the command to. The group selected depends on
-  // the current configuration and the type of command
-  //   SingleKeyCommand: Is just the group managing the shard that the command touches
-  //   MultiKeyCommand: Among all the groups managing the shards the command touches,
-  //                    find the group with the largest identifier
-  //
-  // This function assumes that the shard configuration is non-null
-  private int computeGroupManagingCommand(Command command) {
-    assertWithMessage(this.shardConfigLatest != null,
-                      "ShardStoreClient.computeGroupManagingCommand: no group manages cmd");
-
-    if (command instanceof SingleKeyCommand singleKeyCommand) {
-      return getGroupIdForShard(this.shardConfigLatest, keyToShard(singleKeyCommand.key()));
-    }
-    else if (command instanceof Transaction transaction) {
-      HashSet<Integer> groupsInTransaction = new HashSet<>();
-
-      transaction.keySet().forEach(key -> {
-        groupsInTransaction.add(getGroupIdForShard(this.shardConfigLatest, keyToShard(key)));
-      });
-      return groupsInTransaction.stream().max(Integer::compareTo).get();
-    }
-    else {
-      assertWithMessage(false, "ShardStoreClient.computeGroupManagingCommand: bad cmd");
-      return -1;
-    }
-  }
 
   // send request to all group members associated with the group ID given as argument.
   // requires that the latest configuration is not null

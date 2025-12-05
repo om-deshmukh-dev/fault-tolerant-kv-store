@@ -62,8 +62,8 @@ public class ShardStoreServer extends ShardStoreNode {
 
   // Data structures for 2PC (TWO PHASE COMMIT)
   private final HashMap<Address, AMOExecution> transactionsAlreadyExecuted;
-  private final HashMap<AMOCommand, Pair<HashSet<TPCPrepareOk>, HashSet<TPCCommitOk>>> transactionsOngoingForCoord;
-  private final HashSet<AMOCommand> transactionsOngoingForPart;
+  private final HashMap<AMOCommand, Pair<HashSet<TPCPrepareOk>, HashSet<TPCCommitOk>>> transactionsOngoingAsCoord;
+  private final HashSet<AMOCommand> transactionsOngoingAsPart;
 
   private final Map<Integer, Set<Integer>> reconfigMovesNeeded;
   private final Map<Integer, Set<Integer>> reconfigAcksNeeded;
@@ -88,13 +88,41 @@ public class ShardStoreServer extends ShardStoreNode {
 
   @Data
   public static final class TPCPrepare implements Command {
+    // TODO: add in retry number somewhere
+    private final int groupIdCoord;
     private final int configNum;
-    private final AMOCommand amoCommand;
+    private final AMOCommand amoTransaction; // contains transaction
+
+    public TPCPrepare(int groupIdCoord, int configNum, AMOCommand amoTransaction) {
+      if (!(amoTransaction.command() instanceof Transaction)) {
+        // TODO: assertWithThrow() (so we remember to remove this)
+        System.out.println("S3.TPCPrepare: Bad amo command " + amoTransaction.command());
+        System.exit(255);
+      }
+      this.groupIdCoord = groupIdCoord;
+      this.configNum = configNum;
+      this.amoTransaction = amoTransaction;
+    }
   }
 
   @Data
   public static final class TPCPrepareOk implements Command {
-    // TODO:
+    // TODO: add in retry number somewhere
+    // TODO: add in values
+    private final int groupIdPart; //
+    private final int configNum;
+    private final AMOCommand amoTransaction; // contains transaction
+
+    public TPCPrepareOk(int groupIdPart, int configNum, AMOCommand amoTransaction) {
+      if (!(amoTransaction.command() instanceof Transaction)) {
+        // TODO: assertWithThrow() (so we remember to remove this)
+        System.out.println("S3.TPCPrepareOk: Bad amo command " + amoTransaction.command());
+        System.exit(255);
+      }
+      this.groupIdPart = groupIdPart;
+      this.configNum = configNum;
+      this.amoTransaction = amoTransaction;
+    }
   }
 
   @Data
@@ -121,8 +149,8 @@ public class ShardStoreServer extends ShardStoreNode {
     this.shardConfigLatest = null;
 
     this.transactionsAlreadyExecuted = new HashMap<>();
-    this.transactionsOngoingForCoord = new HashMap<>();
-    this.transactionsOngoingForPart = new HashSet<>();
+    this.transactionsOngoingAsCoord = new HashMap<>();
+    this.transactionsOngoingAsPart = new HashSet<>();
 
     this.reconfigMovesNeeded = new HashMap<>();
     this.reconfigAcksNeeded = new HashMap<>();
@@ -244,7 +272,11 @@ public class ShardStoreServer extends ShardStoreNode {
 
   // for 2PC
   private void handleShardStoreTPCPrepare(ShardStoreTPCPrepare m, Address sender) {
-    assertWithThrow(false, "S3.handleShardStoreTPCPrepare("+this.groupId+"): Req " + m);
+    process(wrapInDummyAMO(m.tpcPrepare()), false);
+  }
+
+  private void handleShardStoreTPCPrepareOk(ShardStoreTPCPrepareOk m, Address sender) {
+    process(wrapInDummyAMO(m.tpcPrepareOk()), false);
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -258,6 +290,10 @@ public class ShardStoreServer extends ShardStoreNode {
       processSingleKeyCommand(amoCommand, isReplicated);
     } else if (amoCommand.command() instanceof Transaction) {
       processTransaction(amoCommand, isReplicated);
+    } else if (amoCommand.command() instanceof TPCPrepare) {
+      processTPCPrepare(amoCommand, isReplicated);
+    } else if (amoCommand.command() instanceof TPCPrepareOk) {
+      processTPCPrepareOk(amoCommand, isReplicated);
     } else if (amoCommand.command() instanceof ShardMove) {
       processShardMoveCommand(amoCommand, isReplicated);
     } else if (amoCommand.command() instanceof ShardMoveAck) {
@@ -479,19 +515,72 @@ public class ShardStoreServer extends ShardStoreNode {
         send(new ShardStoreReply(amoResult), amoCommand.address());
       } else {
         // 2PC case, this group is the coordinator, setup DS, and send prepares to all participants
-        assertWithThrow(!this.transactionsOngoingForCoord.containsKey(amoCommand), "S3.processTransaction: starting new txn but it's already ongoing");
+        assertWithThrow(!this.transactionsOngoingAsCoord.containsKey(amoCommand), "S3.processTransaction: starting new txn but it's already ongoing");
 
-        this.transactionsOngoingForCoord.put(amoCommand, new ImmutablePair<>(new HashSet<>(), new HashSet<>()));
+        this.transactionsOngoingAsCoord.put(amoCommand, new ImmutablePair<>(new HashSet<>(), new HashSet<>()));
         sendAllExceptSelf(
-            new ShardStoreTPCPrepare(new TPCPrepare(this.shardConfigLatest.configNum(), amoCommand)),
+            new ShardStoreTPCPrepare(
+                new TPCPrepare(this.groupId, this.shardConfigLatest.configNum(), amoCommand)
+            ),
             getTransactionParticipants(transaction, this.shardConfigLatest)
         );
       }
     }
   }
 
-  private void processTPCPrepare(@NonNull TPCPrepare tpcPrepare, boolean isReplicated) {
-    assertWithThrow(false, "S3.processTPCPrepare: ???");
+  private void processTPCPrepare(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    TPCPrepare tpcPrepare = (TPCPrepare) amoCommand.command();
+    Transaction transaction = (Transaction) tpcPrepare.amoTransaction().command();
+
+    assertWithThrow(!isReconfigOngoing(), "S3.processTPCPrepare: reconfig ongoing case (send abort)");
+    assertWithThrow(this.shardConfigLatest != null && tpcPrepare.configNum() == this.shardConfigLatest.configNum(), "S3.processTPCPrepare: config mismatch (send abort)");
+    assertWithThrow(!isTxnAlreadyExecuted(tpcPrepare.amoTransaction()), "S3.processTPCPrepare: participant already executed transaction (can drop)");
+    assertWithThrow(!isManagingCommand(tpcPrepare.amoTransaction().command()), "S3.processTPCPrepare: somehow got prepare when managing command in same config as sender (BAD)");
+
+    // the Prepare to eventually send back to coordinator (is unused if not replicated)
+    ShardStoreTPCPrepareOk tpcPrepareOk = new ShardStoreTPCPrepareOk(
+        new TPCPrepareOk(this.groupId, this.shardConfigLatest.configNum(), tpcPrepare.amoTransaction())
+    );
+
+    if (this.transactionsOngoingAsPart.contains(tpcPrepare.amoTransaction())) {
+      // duplicated prepare, send back PrepareOk (works because the config num is the same)
+      sendAllExceptSelf(tpcPrepareOk, getTransactionParticipants(transaction, this.shardConfigLatest));
+      return;
+    }
+
+    assertWithThrow(canAcquireLocks(tpcPrepare.amoTransaction()), "S3.processTPCPrepare: locks cannot be acquired (abort)");
+
+    if (!isReplicated) {
+      handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
+    } else {
+      // TODO: also send values associated with keys in transaction
+      this.transactionsOngoingAsPart.add(tpcPrepare.amoTransaction());
+      sendAllExceptSelf(tpcPrepareOk, getTransactionParticipants(transaction, this.shardConfigLatest));
+    }
+  }
+
+  private void processTPCPrepareOk(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    TPCPrepareOk tpcPrepareOk = (TPCPrepareOk) amoCommand.command();
+    Transaction transaction = (Transaction) tpcPrepareOk.amoTransaction().command();
+
+    assertWithThrow(!isReconfigOngoing(), "S3.processTPCPrepareOk: reconfig ongoing (config nums should not match then)");
+    assertWithThrow(tpcPrepareOk.configNum() == this.shardConfigLatest.configNum(), "S3.processTPCPrepareOk: config num mismatch (just drop, the participant may not even have locks acquired anymore)");
+    // TODO: should make amoTransaction a separate type (so that we don't screw things up accidentally)
+    assertWithThrow(this.transactionsOngoingAsCoord.containsKey(tpcPrepareOk.amoTransaction()), "S3.processTPCPrepareOk: transaction no longer ongoing (can drop)");
+    assertWithThrow(isManagingCommand(transaction), "S3.processTPCPrepareOk: got prepare ok but not manager (coordinator) of transaction");
+
+    if (!isReplicated) {
+      handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
+    } else {
+      HashSet<TPCPrepareOk> prepareOks = this.transactionsOngoingAsCoord.get(tpcPrepareOk.amoTransaction()).getLeft();
+      prepareOks.add(tpcPrepareOk);
+
+      // once every other group has sent back a PrepareOk, can COMMIT
+      if (prepareOks.size() == getTransactionParticipants(transaction, this.shardConfigLatest).size() - 1) {
+        // TODO: aggregate values, and read own keys here as well
+        assertWithThrow(false, "2PC COMMIT WILL COMMENCE!!");
+      }
+    }
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -735,17 +824,17 @@ public class ShardStoreServer extends ShardStoreNode {
 
   // should only be called if the transaction is not already ongoing,
   // either as the coordinator or participant
-  private boolean canAcquireLocks(@NonNull AMOCommand amoCommand) {
-    assertWithThrow(!this.transactionsOngoingForCoord.containsKey(amoCommand) && !this.transactionsOngoingForPart.contains(amoCommand),
+  private boolean canAcquireLocks(@NonNull AMOCommand amoTransaction) {
+    assertWithThrow(!this.transactionsOngoingAsCoord.containsKey(amoTransaction) && !this.transactionsOngoingAsPart.contains(amoTransaction),
                     "S3.canAcquireLocks: locks already acquired for transaction, should not check again");
 
-    return isNoOverlapInTxnKeySet(amoCommand, this.transactionsOngoingForCoord.keySet())
-        && isNoOverlapInTxnKeySet(amoCommand, this.transactionsOngoingForPart);
+    return isNoOverlapInTxnKeySet(amoTransaction, this.transactionsOngoingAsCoord.keySet())
+        && isNoOverlapInTxnKeySet(amoTransaction, this.transactionsOngoingAsPart);
   }
 
   // this group is a coordinator or pure participant in at least one transaction
   private boolean isSomeTxnOngoing() {
-    return !(this.transactionsOngoingForCoord.isEmpty() && this.transactionsOngoingForPart.isEmpty());
+    return !(this.transactionsOngoingAsCoord.isEmpty() && this.transactionsOngoingAsPart.isEmpty());
   }
 
   private boolean isReconfigOngoing() {
@@ -800,7 +889,7 @@ public class ShardStoreServer extends ShardStoreNode {
     return this.shardConfigLatest.configNum() + 1;
   }
 
-  private void assertWithThrow(boolean b, String m) {
+  public void assertWithThrow(boolean b, String m) {
     if (!b) {
       System.out.println(m);
       System.exit(1);

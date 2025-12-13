@@ -504,6 +504,7 @@ public class ShardStoreServer extends ShardStoreNode {
         }
       }
     } else {
+      assertWithThrow(false, "S3.processNewConfig: Shard Move should contain transactionAlreadyExecuted state");
       assertWithThrow(!isSomeTxnOngoing(),
                       "S3.processNewConfig: handle case where new config comes but txn ongoing");
 
@@ -539,8 +540,16 @@ public class ShardStoreServer extends ShardStoreNode {
       return;
     }
 
-    // TODO: check that no transaction that references the same key(s) are ongoing (should also handle if the transaction is already ongoing)
-    assertWithThrow(canAcquireLocks(amoTransaction), "S3.processTransaction: handle case where locks already acquired");
+    // already acquired locks for transaction (ongoing), can just continue with it
+    if (locksAcquiredAsCoordinator(amoTransaction)) {
+      return;
+    }
+
+    // drop the transaction if this group cannot acquire the locks for it
+    if (!canAcquireLocks(amoTransaction)) {
+      return;
+    }
+    assertWithThrow(canAcquireLocks(amoTransaction), "S3.processTransaction: handle case where locks cannot be acquired");
 
     // transaction not handled before, either propose or execute
     if (!isReplicated) {
@@ -571,9 +580,13 @@ public class ShardStoreServer extends ShardStoreNode {
     TPCPrepare tpcPrepare = (TPCPrepare) amoCommand.command();
     Transaction transaction = (Transaction) tpcPrepare.amoTransaction().command();
 
+    // can drop transaction if already executed (duplicated prepare)
+    if (isTxnAlreadyExecuted(tpcPrepare.amoTransaction())) {
+      return;
+    }
+
     assertWithThrow(!isReconfigOngoing(), "S3.processTPCPrepare: reconfig ongoing case (send abort)");
     assertWithThrow(this.shardConfigLatest != null && tpcPrepare.configNum() == this.shardConfigLatest.configNum(), "S3.processTPCPrepare: config mismatch (send abort)");
-    assertWithThrow(!isTxnAlreadyExecuted(tpcPrepare.amoTransaction()), "S3.processTPCPrepare: participant already executed transaction (can drop)");
     assertWithThrow(!isManagingCommand(tpcPrepare.amoTransaction().command()), "S3.processTPCPrepare: somehow got prepare when managing command in same config as sender (BAD)");
 
     // if the config num is the same, cannot be the coordinator of the transaction if another group sent Prepare
@@ -612,7 +625,7 @@ public class ShardStoreServer extends ShardStoreNode {
     assertWithThrow(tpcPrepareOk.configNum() == this.shardConfigLatest.configNum(), "S3.processTPCPrepareOk: config num mismatch (just drop, the participant may not even have locks acquired anymore)");
     // TODO: should make amoTransaction a separate type (so that we don't screw things up accidentally)
     // TODO: should check retry number
-    assertWithThrow(locksAcquiredAsCoordinator(tpcPrepareOk.amoTransaction()), "S3.processTPCPrepareOk: transaction no longer ongoing (can drop)");
+    assertWithThrow(locksAcquiredAsCoordinator(tpcPrepareOk.amoTransaction()), "S3.processTPCPrepareOk: transaction no longer ongoing (BAD)");
     assertWithThrow(isManagingCommand(transaction), "S3.processTPCPrepareOk: got prepare ok but not manager (coordinator) of transaction");
 
     if (!isReplicated) {
@@ -749,20 +762,15 @@ public class ShardStoreServer extends ShardStoreNode {
       setTxnAlreadyExecutedHelper(amoTransaction, new MultiPutOk());
 
     } else if (transaction instanceof Swap swap) {
-      assertWithThrow(false, "S3.txnDecomposeAndExecute: swap not handled yet");
-      // swap across shards
-      Application txnKVStoreKey1 = this.amoApplicationSharded.get(keyToShard(swap.key1())).application();
-      Result resultKey1Get = txnKVStoreKey1.execute(new Get(swap.key1()));
 
-      Application txnKVStoreKey2 = this.amoApplicationSharded.get(keyToShard(swap.key2())).application();
-      Result resultKey2Get = txnKVStoreKey2.execute(new Get(swap.key2()));
-
-      // TODO: this implementation does not completely match the swap in TransactionalKVStore.java (no keys are deleted here)
-      if (resultKey1Get instanceof GetResult getResult) {
-        txnKVStoreKey2.execute(new Put(swap.key2(), getResult.value()));
+      if (this.amoApplicationSharded.containsKey(keyToShard(swap.key1())) && !valuesOfKeysInTxn.values().get(swap.key2()).equals(MultiGetResult.KEY_NOT_FOUND)) {
+        Application txnKVStoreKey1 = this.amoApplicationSharded.get(keyToShard(swap.key1())).application();
+        txnKVStoreKey1.execute(new Put(swap.key1(), valuesOfKeysInTxn.values().get(swap.key2())));
       }
-      if (resultKey2Get instanceof GetResult getResult) {
-        txnKVStoreKey1.execute(new Put(swap.key1(), getResult.value()));
+
+      if (this.amoApplicationSharded.containsKey(keyToShard(swap.key2())) && !valuesOfKeysInTxn.values().get(swap.key1()).equals(MultiGetResult.KEY_NOT_FOUND)) {
+        Application txnKVStoreKey2 = this.amoApplicationSharded.get(keyToShard(swap.key2())).application();
+        txnKVStoreKey2.execute(new Put(swap.key2(), valuesOfKeysInTxn.values().get(swap.key1())));
       }
 
       setTxnAlreadyExecutedHelper(amoTransaction, new SwapOk());
@@ -1062,6 +1070,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
   public void assertWithThrow(boolean b, String m) {
     if (!b) {
+      new Exception().printStackTrace(System.out);
       System.out.println(m);
       System.exit(1);
     }

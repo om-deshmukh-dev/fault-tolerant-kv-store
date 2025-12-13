@@ -79,6 +79,7 @@ public class ShardStoreClient extends ShardStoreNode implements Client {
     AMOResult amoResult = m.result();
 
     if (amoResult.sequenceNum() == this.sequenceNumCommands) {
+      System.out.println("Got Result="+amoResult);
       this.result = amoResult.result();
       this.sequenceNumCommands++;
       notify();

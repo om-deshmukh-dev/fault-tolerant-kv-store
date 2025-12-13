@@ -108,12 +108,12 @@ public class ShardStoreServer extends ShardStoreNode {
   @Data
   public static final class TPCPrepareOk implements Command {
     // TODO: add in retry number somewhere
-    // TODO: add in values
-    private final int groupIdPart; //
+    private final int groupIdPart;
     private final int configNum;
     private final AMOCommand amoTransaction; // contains transaction
+    private final MultiGetResult valuesOfTxnKeys;
 
-    public TPCPrepareOk(int groupIdPart, int configNum, AMOCommand amoTransaction) {
+    public TPCPrepareOk(int groupIdPart, int configNum, AMOCommand amoTransaction, MultiGetResult valuesOfTxnKeys) {
       if (!(amoTransaction.command() instanceof Transaction)) {
         // TODO: assertWithThrow() (so we remember to remove this)
         System.out.println("S3.TPCPrepareOk: Bad amo command " + amoTransaction.command());
@@ -122,17 +122,47 @@ public class ShardStoreServer extends ShardStoreNode {
       this.groupIdPart = groupIdPart;
       this.configNum = configNum;
       this.amoTransaction = amoTransaction;
+      this.valuesOfTxnKeys = valuesOfTxnKeys;
     }
   }
 
   @Data
   public static final class TPCCommit implements Command {
-    // TODO:
+    // TODO: add in (retry #, although a retry # may not be necessary at this point)
+    private final int groupIdCoord;
+    private final int configNum;
+    private final AMOCommand amoTransaction; // contains transaction
+    private final MultiGetResult valuesOfTxnKeys;
+
+    public TPCCommit(int groupIdCoord, int configNum, AMOCommand amoTransaction, MultiGetResult valuesOfTxnKeys) {
+      if (!(amoTransaction.command() instanceof Transaction)) {
+        // TODO: assertWithThrow() (so we remember to remove this)
+        System.out.println("S3.TPCCommit: Bad amo command " + amoTransaction.command());
+        System.exit(255);
+      }
+      this.groupIdCoord = groupIdCoord;
+      this.configNum = configNum;
+      this.amoTransaction = amoTransaction;
+      this.valuesOfTxnKeys = valuesOfTxnKeys;
+    }
   }
 
   @Data
   public static final class TPCCommitOk implements Command {
-    // TODO:
+    private final int groupIdPart;
+    private final int configNum;
+    private final AMOCommand amoTransaction; // contains transaction
+
+    public TPCCommitOk(int groupIdPart, int configNum, AMOCommand amoTransaction) {
+      if (!(amoTransaction.command() instanceof Transaction)) {
+        // TODO: assertWithThrow() (so we remember to remove this)
+        System.out.println("S3.TPCCommitOk: Bad amo command " + amoTransaction.command());
+        System.exit(255);
+      }
+      this.groupIdPart = groupIdPart;
+      this.configNum = configNum;
+      this.amoTransaction = amoTransaction;
+    }
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -279,6 +309,14 @@ public class ShardStoreServer extends ShardStoreNode {
     process(wrapInDummyAMO(m.tpcPrepareOk()), false);
   }
 
+  private void handleShardStoreTPCCommit(ShardStoreTPCCommit m, Address sender) {
+    process(wrapInDummyAMO(m.tpcCommit()), false);
+  }
+
+  private void handleShardStoreTPCCommitOk(ShardStoreTPCCommitOk m, Address sender) {
+    process(wrapInDummyAMO(m.tpcCommitOk()), false);
+  }
+
   /* -----------------------------------------------------------------------------------------------
    *  PROCESS helpers
    * ---------------------------------------------------------------------------------------------*/
@@ -294,6 +332,10 @@ public class ShardStoreServer extends ShardStoreNode {
       processTPCPrepare(amoCommand, isReplicated);
     } else if (amoCommand.command() instanceof TPCPrepareOk) {
       processTPCPrepareOk(amoCommand, isReplicated);
+    } else if (amoCommand.command() instanceof TPCCommit) {
+      processTPCCommit(amoCommand, isReplicated);
+    } else if (amoCommand.command() instanceof  TPCCommitOk) {
+      processTPCCommitOk(amoCommand, isReplicated);
     } else if (amoCommand.command() instanceof ShardMove) {
       processShardMoveCommand(amoCommand, isReplicated);
     } else if (amoCommand.command() instanceof ShardMoveAck) {
@@ -475,8 +517,8 @@ public class ShardStoreServer extends ShardStoreNode {
     this.shardConfigLatest = shardConfigNew;
   }
 
-  private void processTransaction(@NonNull AMOCommand amoCommand, boolean isReplicated) {
-    assertWithThrow(amoCommand.command() instanceof Transaction, "S3.processTransaction: called with wrong command type");
+  private void processTransaction(@NonNull AMOCommand amoTransaction, boolean isReplicated) {
+    assertWithThrow(amoTransaction.command() instanceof Transaction, "S3.processTransaction: called with wrong command type");
 
     if (isReconfigOngoing()) {
       assertWithThrow(!isSomeTxnOngoing(), "S3.processTransaction: no txn should be ongoing during reconfig");
@@ -486,43 +528,40 @@ public class ShardStoreServer extends ShardStoreNode {
     }
 
     // check if this group is managing the transaction (coordinator)
-    Transaction transaction = (Transaction) amoCommand.command();
+    Transaction transaction = (Transaction) amoTransaction.command();
     if (!isManagingCommand(transaction)) {
       return;
     }
 
     // if the transaction has already been executed, then reply back to the client
-    if (isTxnAlreadyExecuted(amoCommand)) {
-      AMOExecution amoExecutionLatest = this.transactionsAlreadyExecuted.get(amoCommand.address());
-      send(new ShardStoreReply(amoExecutionLatest.amoResult()), amoCommand.address());
+    if (isTxnAlreadyExecuted(amoTransaction)) {
+      send(new ShardStoreReply(getResultOfTransaction(amoTransaction)), amoTransaction.address());
       return;
     }
 
     // TODO: check that no transaction that references the same key(s) are ongoing (should also handle if the transaction is already ongoing)
-    assertWithThrow(canAcquireLocks(amoCommand), "S3.processTransaction: handle case where locks already acquired");
+    assertWithThrow(canAcquireLocks(amoTransaction), "S3.processTransaction: handle case where locks already acquired");
 
     // transaction not handled before, either propose or execute
     if (!isReplicated) {
-      handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
+      handleMessage(new PaxosRequest(amoTransaction), this.paxosAddress);
     } else {
 
       if (getTransactionParticipants(transaction, this.shardConfigLatest).size() == 1) {
         // this group can execute the entire transaction at once (no 2PC case)
-        KVStoreResult kvStoreResult = transactionDecomposeAndExecute(amoCommand);
-        AMOResult amoResult = new AMOResult(kvStoreResult, amoCommand.sequenceNum());
-        this.transactionsAlreadyExecuted.put(amoCommand.address(), new AMOExecution(amoCommand, amoResult));
-
-        send(new ShardStoreReply(amoResult), amoCommand.address());
+        txnDecomposeAndExecute(amoTransaction, getValuesOfKeysManagedInTxn(amoTransaction));
+        send(new ShardStoreReply(getResultOfTransaction(amoTransaction)), amoTransaction.address());
       } else {
         // 2PC case, this group is the coordinator, setup DS, and send prepares to all participants
-        assertWithThrow(!this.transactionsOngoingAsCoord.containsKey(amoCommand), "S3.processTransaction: starting new txn but it's already ongoing");
+        assertWithThrow(!this.transactionsOngoingAsCoord.containsKey(amoTransaction), "S3.processTransaction: starting new txn but it's already ongoing");
 
-        this.transactionsOngoingAsCoord.put(amoCommand, new ImmutablePair<>(new HashSet<>(), new HashSet<>()));
+        this.transactionsOngoingAsCoord.put(amoTransaction, new ImmutablePair<>(new HashSet<>(), new HashSet<>()));
         sendAllExceptSelf(
             new ShardStoreTPCPrepare(
-                new TPCPrepare(this.groupId, this.shardConfigLatest.configNum(), amoCommand)
+                new TPCPrepare(this.groupId, this.shardConfigLatest.configNum(), amoTransaction)
             ),
-            getTransactionParticipants(transaction, this.shardConfigLatest)
+            getTransactionParticipants(transaction, this.shardConfigLatest),
+            true
         );
       }
     }
@@ -537,25 +576,26 @@ public class ShardStoreServer extends ShardStoreNode {
     assertWithThrow(!isTxnAlreadyExecuted(tpcPrepare.amoTransaction()), "S3.processTPCPrepare: participant already executed transaction (can drop)");
     assertWithThrow(!isManagingCommand(tpcPrepare.amoTransaction().command()), "S3.processTPCPrepare: somehow got prepare when managing command in same config as sender (BAD)");
 
-    // the Prepare to eventually send back to coordinator (is unused if not replicated)
-    ShardStoreTPCPrepareOk tpcPrepareOk = new ShardStoreTPCPrepareOk(
-        new TPCPrepareOk(this.groupId, this.shardConfigLatest.configNum(), tpcPrepare.amoTransaction())
-    );
-
-    if (this.transactionsOngoingAsPart.contains(tpcPrepare.amoTransaction())) {
-      // duplicated prepare, send back PrepareOk (works because the config num is the same)
-      sendAllExceptSelf(tpcPrepareOk, getTransactionParticipants(transaction, this.shardConfigLatest));
-      return;
+    // if the config num is the same, cannot be the coordinator of the transaction if another group sent Prepare
+    if (!locksAcquiredAsParticipant(tpcPrepare.amoTransaction())) {
+      assertWithThrow(!locksAcquiredAsCoordinator(tpcPrepare.amoTransaction()), "S3.processTPCPrepare: for transaction T, this group and the sender cannot simultaneously be coordinator (BAD)");
+      assertWithThrow(canAcquireLocks(tpcPrepare.amoTransaction()), "S3.processTPCPrepare: locks cannot be acquired (should send abort)"); // TODO: abort
     }
-
-    assertWithThrow(canAcquireLocks(tpcPrepare.amoTransaction()), "S3.processTPCPrepare: locks cannot be acquired (abort)");
 
     if (!isReplicated) {
       handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
     } else {
-      // TODO: also send values associated with keys in transaction
-      this.transactionsOngoingAsPart.add(tpcPrepare.amoTransaction());
-      sendAllExceptSelf(tpcPrepareOk, getTransactionParticipants(transaction, this.shardConfigLatest));
+      this.transactionsOngoingAsPart.add(tpcPrepare.amoTransaction()); // this acquires locks (if not acquired already)
+      ShardStoreTPCPrepareOk tpcPrepareOk = new ShardStoreTPCPrepareOk(
+          new TPCPrepareOk(
+              this.groupId, this.shardConfigLatest.configNum(),
+              tpcPrepare.amoTransaction(),
+              getValuesOfKeysManagedInTxn(tpcPrepare.amoTransaction())
+          )
+      );
+
+      // reply only to the coordinator
+      sendToGroup(tpcPrepareOk, tpcPrepare.groupIdCoord);
     }
   }
 
@@ -563,10 +603,16 @@ public class ShardStoreServer extends ShardStoreNode {
     TPCPrepareOk tpcPrepareOk = (TPCPrepareOk) amoCommand.command();
     Transaction transaction = (Transaction) tpcPrepareOk.amoTransaction().command();
 
+    // TODO: think about this more (as the locks may still be acquired, want to be careful about not having hanging locks)
+    if (isTxnAlreadyExecuted(tpcPrepareOk.amoTransaction())) {
+      return;
+    }
+
     assertWithThrow(!isReconfigOngoing(), "S3.processTPCPrepareOk: reconfig ongoing (config nums should not match then)");
     assertWithThrow(tpcPrepareOk.configNum() == this.shardConfigLatest.configNum(), "S3.processTPCPrepareOk: config num mismatch (just drop, the participant may not even have locks acquired anymore)");
     // TODO: should make amoTransaction a separate type (so that we don't screw things up accidentally)
-    assertWithThrow(this.transactionsOngoingAsCoord.containsKey(tpcPrepareOk.amoTransaction()), "S3.processTPCPrepareOk: transaction no longer ongoing (can drop)");
+    // TODO: should check retry number
+    assertWithThrow(locksAcquiredAsCoordinator(tpcPrepareOk.amoTransaction()), "S3.processTPCPrepareOk: transaction no longer ongoing (can drop)");
     assertWithThrow(isManagingCommand(transaction), "S3.processTPCPrepareOk: got prepare ok but not manager (coordinator) of transaction");
 
     if (!isReplicated) {
@@ -575,10 +621,81 @@ public class ShardStoreServer extends ShardStoreNode {
       HashSet<TPCPrepareOk> prepareOks = this.transactionsOngoingAsCoord.get(tpcPrepareOk.amoTransaction()).getLeft();
       prepareOks.add(tpcPrepareOk);
 
-      // once every other group has sent back a PrepareOk, can COMMIT
+      // once every other group has sent back a PrepareOk, this group (coordinator) can COMMIT
+      // the transaction by executing it, then sending a COMMIT message to all
       if (prepareOks.size() == getTransactionParticipants(transaction, this.shardConfigLatest).size() - 1) {
-        // TODO: aggregate values, and read own keys here as well
-        assertWithThrow(false, "2PC COMMIT WILL COMMENCE!!");
+
+        MultiGetResult valuesOfKeysMerged = getValuesOfKeysManagedInTxn(tpcPrepareOk.amoTransaction());
+        for (TPCPrepareOk prepareOkReceived : prepareOks) {
+          assertWithThrow(Sets.intersection(prepareOkReceived.valuesOfTxnKeys().values().keySet(), valuesOfKeysMerged.values().keySet()).isEmpty(), "S3.processTPCPrepare: read keys must be disjoint among all participants");
+          valuesOfKeysMerged.values().putAll(prepareOkReceived.valuesOfTxnKeys().values());
+        }
+
+        // execute TXN, send COMMIT to all other groups involved in TXN
+        txnDecomposeAndExecute(tpcPrepareOk.amoTransaction(), valuesOfKeysMerged);
+        sendAllExceptSelf(
+            new ShardStoreTPCCommit(
+                new TPCCommit(this.groupId, this.shardConfigLatest.configNum(),
+                              tpcPrepareOk.amoTransaction(), valuesOfKeysMerged)
+            ),
+            getTransactionParticipants(transaction, this.shardConfigLatest),
+            true
+        );
+      }
+    }
+  }
+
+  private void processTPCCommit(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    TPCCommit tpcCommit = (TPCCommit) amoCommand.command();
+    Transaction transaction = (Transaction) tpcCommit.amoTransaction().command();
+
+    // message to send back (if the commit is successful here)
+    ShardStoreTPCCommitOk commitOkMsg = new ShardStoreTPCCommitOk(
+        new TPCCommitOk(this.groupId, this.shardConfigLatest.configNum(), tpcCommit.amoTransaction())
+    );
+
+    if (!locksAcquiredAsParticipant(tpcCommit.amoTransaction())) {
+      assertWithThrow(isTxnAlreadyExecuted(tpcCommit.amoTransaction()), "S3.processTPCCommit: locks released, but committed transaction not already executed (BAD)");
+      sendToGroup(commitOkMsg, tpcCommit.groupIdCoord());
+      return;
+    }
+
+    assertWithThrow(this.shardConfigLatest.configNum() == tpcCommit.configNum(), "S3.processTPCCommit: config num mismatch (config in commit must be smaller)");
+    assertWithThrow(!isReconfigOngoing(), "S3.processTPCCommit: reconfiguration ongoing (should not be possible at this point)");
+    assertWithThrow(!isTxnAlreadyExecuted(tpcCommit.amoTransaction()), "S3.processTPCCommit: somehow locks acquired, but txn already executed");
+
+    if (!isReplicated) {
+      handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
+    } else {
+      txnDecomposeAndExecute(tpcCommit.amoTransaction(), tpcCommit.valuesOfTxnKeys());
+      this.transactionsOngoingAsPart.remove(tpcCommit.amoTransaction());
+      sendToGroup(commitOkMsg, tpcCommit.groupIdCoord());
+    }
+  }
+
+  private void processTPCCommitOk(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    TPCCommitOk tpcCommitOk = (TPCCommitOk) amoCommand.command();
+    Transaction transaction = (Transaction) tpcCommitOk.amoTransaction().command();
+    Address client = tpcCommitOk.amoTransaction().address();
+
+    if (!locksAcquiredAsCoordinator(tpcCommitOk.amoTransaction())) {
+      assertWithThrow(isTxnAlreadyExecuted(tpcCommitOk.amoTransaction()), "S3.processTPCCommitOk: locks released on committed transaction, but not already executed");
+      send(new ShardStoreReply(getResultOfTransaction(tpcCommitOk.amoTransaction())), client);
+      return;
+    }
+
+    assertWithThrow(!isReconfigOngoing(), "S3.processTPCCommitOk: reconfiguration ongoing (should not be possible at this point)");
+    assertWithThrow(this.shardConfigLatest.configNum() == tpcCommitOk.configNum(), "S3.processTPCCommit: config num mismatch (config in commit must be smaller)");
+
+    if (!isReplicated) {
+      handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
+    } else {
+      HashSet<TPCCommitOk> commitOks = this.transactionsOngoingAsCoord.get(tpcCommitOk.amoTransaction()).getRight();
+      commitOks.add(tpcCommitOk);
+
+      if (commitOks.size() == getTransactionParticipants(transaction, this.shardConfigLatest).size() - 1) {
+        this.transactionsOngoingAsCoord.remove(tpcCommitOk.amoTransaction()); // releases locks
+        send(new ShardStoreReply(getResultOfTransaction(tpcCommitOk.amoTransaction())), client);
       }
     }
   }
@@ -587,77 +704,78 @@ public class ShardStoreServer extends ShardStoreNode {
    *  Core Helpers
    * ---------------------------------------------------------------------------------------------*/
 
+  // Update transactionsAlreadyExecuted to contain this transaction for the client which sent it
+  private void setTxnAlreadyExecutedHelper(AMOCommand amoTransaction, KVStoreResult kvStoreResult) {
+    assertWithThrow(!this.transactionsAlreadyExecuted.containsKey(amoTransaction.address())
+            || this.transactionsAlreadyExecuted.get(amoTransaction.address()).amoCommand().sequenceNum() < amoTransaction.sequenceNum(),
+        "S3.setTransactionsAlreadyExecutedHelper: transaction must be new (not already executed)");
+
+    AMOResult amoResult = new AMOResult(kvStoreResult, amoTransaction.sequenceNum());
+    this.transactionsAlreadyExecuted.put(amoTransaction.address(), new AMOExecution(amoTransaction, amoResult));
+  }
+
   // Decomposes a transaction into the set of MultiCommands associated with the keys this group
   // manages, and executes the MultiCommands directly on the application (bypassing AMO logic).
-  // The aggregated results of the MultiCommands are returned as a single Transaction KVStoreResult
+  // The result of the transaction is then placed inside the transactionsAlreadyExecuted structure.
   //
   // Requires that either:
   //  1. The transaction is fully contained in a single group, and a Transaction decision was made
   //  2. The transaction is cross-group, and a COMMIT decision for an ongoing Transaction was received
-  private KVStoreResult transactionDecomposeAndExecute(@NonNull AMOCommand amoCommand) {
-    assertWithThrow(amoCommand.command() instanceof Transaction, "S3.transactionDecomposeAndExecute: called on non-txn");
-    assertWithThrow(this.shardConfigLatest != null, "S3.transactionDecomposeAndExecute: null config");
-    assertWithThrow(!isTxnAlreadyExecuted(amoCommand), "S3.transactionDecomposeAndExecute: already executed txn");
+  private void txnDecomposeAndExecute(AMOCommand amoTransaction, MultiGetResult valuesOfKeysInTxn) {
+    assertWithThrow(amoTransaction.command() instanceof Transaction, "S3.txnDecomposeAndExecute: called on non-txn");
+    Transaction transaction = (Transaction) amoTransaction.command();
+    
+    assertWithThrow(this.shardConfigLatest != null, "S3.txnDecomposeAndExecute: null config");
+    assertWithThrow(!isTxnAlreadyExecuted(amoTransaction), "S3.txnDecomposeAndExecute: already executed txn");
+    assertWithThrow(transaction.keySet().equals(valuesOfKeysInTxn.values().keySet()), "S3.txnDecomposeAndExecute: mismatch in keys of transaction and read values");
 
-    Transaction transaction = (Transaction) amoCommand.command();
+
     assertWithThrow(getTransactionParticipants(transaction, this.shardConfigLatest).contains(this.groupId),
-                    "S3.transactionDecomposeAndExecute: executing txn, but not a participant in it");
-    assertWithThrow(transaction.keySet().stream().allMatch(key -> this.amoApplicationSharded.containsKey(keyToShard(key))),
-                    "S3.transactionDecomposeAndExecute: have not yet handled managing subset of keys");
+                    "S3.txnDecomposeAndExecute: executing txn, but not a participant in it");
 
-    if (transaction instanceof MultiGet multiGet) {
-      MultiGetResult multiGetResultAggregated = new MultiGetResult(new HashMap<>());
-
-      // bypass AMO logic to run MultiGet on the various transactional KVStore shards this group manages
-      for (String key : multiGet.keySet()) {
-        Application txnKVStoreShard = this.amoApplicationSharded.get(keyToShard(key)).application();
-        MultiGetResult multiGetResult = (MultiGetResult) txnKVStoreShard.execute(
-            new MultiGet(new HashSet<>(Collections.singleton(key)))
-        );
-        multiGetResultAggregated.values().putAll(multiGetResult.values());
-      }
-
-      return multiGetResultAggregated;
-
+    if (transaction instanceof MultiGet) {
+      setTxnAlreadyExecutedHelper(amoTransaction, valuesOfKeysInTxn);
     } else if (transaction instanceof MultiPut multiPut) {
 
       for (String key : multiPut.keySet()) {
-        Application txnKVStoreShard = this.amoApplicationSharded.get(keyToShard(key)).application();
+        if (this.amoApplicationSharded.containsKey(keyToShard(key))) {
+          Application txnKVStoreShard = this.amoApplicationSharded.get(keyToShard(key)).application();
 
-        HashMap<String, String> multiPutShard = new HashMap<>();
-        multiPutShard.put(key, multiPut.values().get(key));
-        txnKVStoreShard.execute(new MultiPut(multiPutShard));
+          HashMap<String, String> multiPutShard = new HashMap<>();
+          multiPutShard.put(key, multiPut.values().get(key));
+          txnKVStoreShard.execute(new MultiPut(multiPutShard));
+        }
       }
-
-      return new MultiPutOk();
+      setTxnAlreadyExecutedHelper(amoTransaction, new MultiPutOk());
 
     } else if (transaction instanceof Swap swap) {
-      // TODO: need to fix this for cross-group swaps
-      if (keyToShard(swap.key1()) == keyToShard(swap.key2())) {
-        assertWithThrow(false, "S3.transactionDecomposeAndExecute: txn on same shard (not tested yet)");
-        // this.amoApplicationSharded.get(keyToShard(swap.key1())).application().execute(swap);
-      } else {
-        // swap across shards
-        Application txnKVStoreKey1 = this.amoApplicationSharded.get(keyToShard(swap.key1())).application();
-        Result resultKey1Get = txnKVStoreKey1.execute(new Get(swap.key1()));
+      assertWithThrow(false, "S3.txnDecomposeAndExecute: swap not handled yet");
+      // swap across shards
+      Application txnKVStoreKey1 = this.amoApplicationSharded.get(keyToShard(swap.key1())).application();
+      Result resultKey1Get = txnKVStoreKey1.execute(new Get(swap.key1()));
 
-        Application txnKVStoreKey2 = this.amoApplicationSharded.get(keyToShard(swap.key2())).application();
-        Result resultKey2Get = txnKVStoreKey2.execute(new Get(swap.key2()));
+      Application txnKVStoreKey2 = this.amoApplicationSharded.get(keyToShard(swap.key2())).application();
+      Result resultKey2Get = txnKVStoreKey2.execute(new Get(swap.key2()));
 
-        // TODO: this implementation does not completely match the swap in TransactionalKVStore.java (no keys are deleted here)
-        if (resultKey1Get instanceof GetResult getResult) {
-          txnKVStoreKey2.execute(new Put(swap.key2(), getResult.value()));
-        }
-        if (resultKey2Get instanceof GetResult getResult) {
-          txnKVStoreKey1.execute(new Put(swap.key1(), getResult.value()));
-        }
+      // TODO: this implementation does not completely match the swap in TransactionalKVStore.java (no keys are deleted here)
+      if (resultKey1Get instanceof GetResult getResult) {
+        txnKVStoreKey2.execute(new Put(swap.key2(), getResult.value()));
+      }
+      if (resultKey2Get instanceof GetResult getResult) {
+        txnKVStoreKey1.execute(new Put(swap.key1(), getResult.value()));
       }
 
-      return new SwapOk();
+      setTxnAlreadyExecutedHelper(amoTransaction, new SwapOk());
+
     } else {
-      assertWithThrow(false, "S3.transactionDecomposeAndExecute: bad transaction");
-      return null;
+      assertWithThrow(false, "S3.txnDecomposeAndExecute: bad transaction");
     }
+  }
+
+  private AMOResult getResultOfTransaction(AMOCommand amoTransaction) {
+    assertWithThrow(isTxnAlreadyExecuted(amoTransaction), "S3.getResultOfTransaction: must already be executed");
+    AMOExecution amoExecutionLatest = this.transactionsAlreadyExecuted.get(amoTransaction.address());
+    return amoExecutionLatest.amoResult();
   }
 
   // process commands that were queued during reconfiguration
@@ -761,6 +879,37 @@ public class ShardStoreServer extends ShardStoreNode {
     }
   }
 
+  // for 2PC:
+
+  // Get the values of all keys in the transaction that this group manages
+  // (could still return KEY_NOT_FOUND for some keys).
+  // Requires that this group has the locks acquired for the transaction, or is
+  // the only group involved in the transaction.
+  private MultiGetResult getValuesOfKeysManagedInTxn(@NonNull AMOCommand amoTransaction) {
+    assertWithThrow(amoTransaction.command() instanceof Transaction, "S3.getValuesOfKeysInTxn: Bad amo command");
+    Transaction transaction = (Transaction) amoTransaction.command();
+
+    assertWithThrow( getTransactionParticipants(transaction, this.shardConfigLatest).size() == 1
+                     || locksAcquiredAsParticipant(amoTransaction)
+                     || locksAcquiredAsCoordinator(amoTransaction),
+        "S3.getValuesOfKeysInTxn: Must have the locks acquired for txn already (unless txn is not cross-group)");
+
+    MultiGetResult multiGetResultAggregated = new MultiGetResult(new HashMap<>());
+
+    // bypass AMO logic to run MultiGet on the various transactional KVStore shards this group manages
+    transaction.keySet().forEach(key -> {
+      if (this.amoApplicationSharded.containsKey(keyToShard(key))) {
+        Application txnKVStoreShard = this.amoApplicationSharded.get(keyToShard(key)).application();
+        MultiGetResult multiGetResult = (MultiGetResult) txnKVStoreShard.execute(
+            new MultiGet(new HashSet<>(Collections.singleton(key)))
+        );
+        multiGetResultAggregated.values().putAll(multiGetResult.values());
+      }
+    });
+
+    return multiGetResultAggregated;
+  }
+
   /* -----------------------------------------------------------------------------------------------
    *  Timer Handlers
    * ---------------------------------------------------------------------------------------------*/
@@ -786,18 +935,18 @@ public class ShardStoreServer extends ShardStoreNode {
    *  Utils
    * ---------------------------------------------------------------------------------------------*/
 
-  private boolean isTxnAlreadyExecuted(@NonNull AMOCommand amoCommand) {
-    assertWithThrow(amoCommand.command() instanceof Transaction, "S3.isTxnAlreadyExecuted: cmd not txn");
+  private boolean isTxnAlreadyExecuted(@NonNull AMOCommand amoTransaction) {
+    assertWithThrow(amoTransaction.command() instanceof Transaction, "S3.isTxnAlreadyExecuted: cmd not txn");
 
-    if (!this.transactionsAlreadyExecuted.containsKey(amoCommand.address())) {
+    if (!this.transactionsAlreadyExecuted.containsKey(amoTransaction.address())) {
       return false;
     }
 
     // transaction is already executed if the highest executed seq num
     // is at least as large as the seq num in the command
     return this.transactionsAlreadyExecuted.get(
-        amoCommand.address()
-    ).amoResult().sequenceNum() >= amoCommand.sequenceNum();
+        amoTransaction.address()
+    ).amoResult().sequenceNum() >= amoTransaction.sequenceNum();
   }
 
   // returns the set of shards that the group in the argument manages, or returns emptyset
@@ -832,6 +981,22 @@ public class ShardStoreServer extends ShardStoreNode {
         && isNoOverlapInTxnKeySet(amoTransaction, this.transactionsOngoingAsPart);
   }
 
+  private boolean locksAcquiredAsParticipant(AMOCommand amoTransaction) {
+    assertWithThrow(amoTransaction.command() instanceof Transaction, "S3.locksAcquiredAsParticipant: Bad amo command");
+    Transaction transaction = (Transaction) amoTransaction.command();
+    assertWithThrow(getTransactionParticipants(transaction, this.shardConfigLatest).contains(this.groupId),
+                  "S3.locksAcquiredAsParticipant: this group must be involved in transaction");
+    return this.transactionsOngoingAsPart.contains(amoTransaction);
+  }
+
+  private boolean locksAcquiredAsCoordinator(AMOCommand amoTransaction) {
+    assertWithThrow(amoTransaction.command() instanceof Transaction, "S3.locksAcquiredAsCoordinator: Bad amo command");
+    Transaction transaction = (Transaction) amoTransaction.command();
+    assertWithThrow(getTransactionParticipants(transaction, this.shardConfigLatest).contains(this.groupId),
+        "S3.locksAcquiredAsCoordinator: this group must be involved in transaction");
+    return this.transactionsOngoingAsCoord.containsKey(amoTransaction);
+  }
+
   // this group is a coordinator or pure participant in at least one transaction
   private boolean isSomeTxnOngoing() {
     return !(this.transactionsOngoingAsCoord.isEmpty() && this.transactionsOngoingAsPart.isEmpty());
@@ -849,20 +1014,26 @@ public class ShardStoreServer extends ShardStoreNode {
     return this.groupId == computeGroupManagingCommand(command, this.shardConfigLatest);
   }
 
+  private void sendToGroup(Message message, int groupIdReceiver) {
+    assertWithThrow(this.groupId != groupIdReceiver, "S3.sendToGroup: should not send to self");
+    assertWithThrow(this.shardConfigLatest != null && this.shardConfigLatest.groupInfo().containsKey(groupIdReceiver),
+        "S3.sendToGroup: cannot send to non-existent group");
+    broadcast(message, this.shardConfigLatest.groupInfo().get(groupIdReceiver).getLeft());
+  }
+
   // Send a message to all groups that need the message, but don't send to self.
   // It is required that every group in the set is in the current config,
   // and the group set contains this group as part of it
-  private void sendAllExceptSelf(Message message, Set<Integer> groupIds) {
-    assertWithThrow(groupIds.contains(this.groupId), "S3.sendAllExceptSelf(group version): this group should be in groupset");
-
-    for (Integer groupIdToSendTo : groupIds) {
-      assertWithThrow(this.shardConfigLatest != null && this.shardConfigLatest.groupInfo().containsKey(groupIdToSendTo),
-                      "S3.sendAllExceptSelf(group version): every group ");
-
-      if (groupIdToSendTo != this.groupId) {
-        broadcast(message, this.shardConfigLatest.groupInfo().get(groupIdToSendTo).getLeft());
+  // (The isCoordinator argument is just meant to make you think about when this function is called (participants should not call this))
+  // TODO: probably should enforce isCoordinator in a better way
+  private void sendAllExceptSelf(Message message, Set<Integer> groupIds, boolean isCoordinator) {
+    assertWithThrow(isCoordinator, "S3.sendAllExceptSelf: only coordinator for a transaction should be broadcasting across groups");
+    assertWithThrow(groupIds.contains(this.groupId), "S3.sendAllExceptSelf: this group should be in groupset");
+    groupIds.forEach(groupIdReceiver -> {
+      if (groupIdReceiver != this.groupId) {
+        sendToGroup(message, groupIdReceiver);
       }
-    }
+    });
   }
 
   private AMOCommand wrapInDummyAMO(Command command) {

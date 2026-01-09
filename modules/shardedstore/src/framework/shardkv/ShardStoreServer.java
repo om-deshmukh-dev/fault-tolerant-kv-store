@@ -77,7 +77,7 @@ public class ShardStoreServer extends ShardStoreNode {
     private final int groupIdSender; // the group that sent the shards (the group that gets this message is gaining shards)
     private final int configNum;
     private final Map<Integer, AMOApplication<Application>> amoAppShards;
-    //private final Map<Integer, AMOExecution> transactionsAlreadyExecutedSender;
+    private final Map<Address, AMOExecution> transactionsAlreadyExecutedSender;
   }
 
   @Data
@@ -403,6 +403,15 @@ public class ShardStoreServer extends ShardStoreNode {
         this.amoApplicationSharded.put(shard, amoApp);
       });
 
+      // merge the transaction state from the ShardMove message
+      shardMoveToUs.transactionsAlreadyExecutedSender().forEach((client, execution) -> {
+        if (!this.transactionsAlreadyExecuted.containsKey(client)
+          || this.transactionsAlreadyExecuted.get(client).amoCommand().sequenceNum() < execution.amoCommand().sequenceNum()
+        ) {
+            this.transactionsAlreadyExecuted.put(client, execution);
+        }
+      });
+
       // remove group from ReconfigMovesNeeded, and send Ack with this group's group ID embedded
       this.reconfigMovesNeeded.remove(shardMoveToUs.groupIdSender());
       broadcast(
@@ -505,7 +514,6 @@ public class ShardStoreServer extends ShardStoreNode {
         }
       }
     } else {
-      assertWithThrow(this.transactionsAlreadyExecuted.isEmpty(), "S3.processNewConfig: Shard Move should contain transactionAlreadyExecuted state");
       assertWithThrow(!isSomeTxnOngoing(), "S3.processNewConfig: handle case where new config comes but txn ongoing");
 
       setupReconfigDS(shardConfigNew);
@@ -631,7 +639,7 @@ public class ShardStoreServer extends ShardStoreNode {
     assertWithThrow(tpcPrepareOk.configNum() == this.shardConfigLatest.configNum(), "S3.processTPCPrepareOk: config num mismatch (just drop, the participant may not even have locks acquired anymore)");
     // TODO: should make amoTransaction a separate type (so that we don't screw things up accidentally)
     // TODO: should check retry number
-    assertWithThrow(!isReplicated || locksAcquiredAsCoordinator(tpcPrepareOk.amoTransaction()), "S3.processTPCPrepareOk: transaction no longer ongoing (BAD "+isReplicated+", "+locksAcquiredAsParticipant(tpcPrepareOk.amoTransaction())+")");
+    assertWithThrow(locksAcquiredAsCoordinator(tpcPrepareOk.amoTransaction()), "S3.processTPCPrepareOk: transaction no longer ongoing (BAD "+isReplicated+", "+locksAcquiredAsParticipant(tpcPrepareOk.amoTransaction())+")");
     assertWithThrow(isManagingCommand(transaction), "S3.processTPCPrepareOk: got prepare ok but not manager (coordinator) of transaction");
 
 
@@ -685,7 +693,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
     assertWithThrow(this.shardConfigLatest.configNum() == tpcCommit.configNum(), "S3.processTPCCommit: config num mismatch (config in commit must be smaller)");
     assertWithThrow(!isReconfigOngoing(), "S3.processTPCCommit: reconfiguration ongoing (should not be possible at this point)");
-    assertWithThrow(!isTxnAlreadyExecuted(tpcCommit.amoTransaction()), "S3.processTPCCommit: somehow locks acquired, but txn already executed ("+ tpcCommit.amoTransaction().address()+","+tpcCommit.amoTransaction()+", "+this.transactionsAlreadyExecuted+")");
+    assertWithThrow(!isTxnAlreadyExecuted(tpcCommit.amoTransaction()), "S3.processTPCCommit: somehow locks acquired, but txn already executed ("+ tpcCommit.amoTransaction().address()+","+tpcCommit.amoTransaction()+",      "+this.transactionsAlreadyExecuted+",       "+this.transactionsOngoingAsPart+")");
 
     txnDecomposeAndExecute(tpcCommit.amoTransaction(), tpcCommit.valuesOfTxnKeys());
     this.transactionsOngoingAsPart.remove(tpcCommit.amoTransaction());
@@ -885,7 +893,7 @@ public class ShardStoreServer extends ShardStoreNode {
       assertWithThrow(shardConfig.groupInfo().containsKey(groupIdReceiver), "resendShardMoves: receiver not in shardConfig");
 
       // tell receiver that this group is sending a collection of application shards to them
-      ShardMove shardMoveToReceiver = new ShardMove(this.groupId, shardConfig.configNum(), new HashMap<>());
+      ShardMove shardMoveToReceiver = new ShardMove(this.groupId, shardConfig.configNum(), new HashMap<>(), this.transactionsAlreadyExecuted);
 
       this.reconfigAcksNeeded.get(groupIdReceiver).forEach((shard) -> {
         shardMoveToReceiver.amoAppShards().put(shard, this.amoApplicationSharded.get(shard));

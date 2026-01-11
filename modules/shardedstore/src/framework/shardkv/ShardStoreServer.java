@@ -31,6 +31,7 @@ import framework.paxos.PaxosServer;
 import framework.shardmaster.ShardMaster;
 import framework.shardmaster.ShardMaster.Query;
 import framework.shardmaster.ShardMaster.ShardConfig;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -38,16 +39,22 @@ import java.util.LinkedList;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.logging.FileHandler;
+import java.util.logging.Level;
+import java.util.logging.SimpleFormatter;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.NonNull;
 import lombok.ToString;
 import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.commons.lang3.tuple.Pair;
+import java.util.logging.Logger;
 
 @ToString(callSuper = true)
 @EqualsAndHashCode(callSuper = true)
 public class ShardStoreServer extends ShardStoreNode {
+  private final Logger logger;
+
   private final Address[] group;
   private final int groupId;
   private final int numTotalShards;
@@ -186,6 +193,19 @@ public class ShardStoreServer extends ShardStoreNode {
     this.reconfigMovesNeeded = new HashMap<>();
     this.reconfigAcksNeeded = new HashMap<>();
     this.commandsRejectedDuringReconfig = new LinkedList<>();
+
+    this.logger = Logger.getLogger(ShardStoreServer.class.getName() + "_" + this.groupId + "_" + this.address());
+    try {
+      // The first argument is the log file path, the second (true) enables appending to the file.
+      FileHandler fh = new FileHandler("/Users/yacqubmohamed/Documents/School/Cornell/CornellClasses/CSCLASSES/Senior/CS5414/dslabs_fork/dslabs_no_merge_conflict_lab43/CS5414-dslabs/S3("+this.groupId+","+this.address()+").log", false);
+      SimpleFormatter formatter = new SimpleFormatter();
+      fh.setFormatter(formatter);
+      logger.addHandler(fh);
+      logger.setLevel(Level.ALL);
+    } catch (IOException e) {
+      e.printStackTrace();
+      System.exit(500);
+    }
   }
 
   @Override
@@ -347,6 +367,8 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private void processShardMoveAckCommand(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     if (!isReplicated) {
       handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
       return;
@@ -377,9 +399,13 @@ public class ShardStoreServer extends ShardStoreNode {
         processRejectedCommands();
       }
     }
+
+    assertGuard();
   }
 
   private void processShardMoveCommand(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     if (!isReplicated) {
       handleMessage(new PaxosRequest(amoCommand), this.paxosAddress);
       return;
@@ -426,10 +452,12 @@ public class ShardStoreServer extends ShardStoreNode {
         processRejectedCommands();
       }
     }
+    assertGuard();
 
   }
 
   private void processSingleKeyCommand(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
     assertWithThrow(amoCommand.command() instanceof SingleKeyCommand, "S3.processSingleKeyCommand: called with wrong command type");
 
     if (isReconfigOngoing()) {
@@ -462,10 +490,13 @@ public class ShardStoreServer extends ShardStoreNode {
       int shardContainingKey = keyToShard(singleKeyCommand.key());
       AMOResult amoResult = this.amoApplicationSharded.get(shardContainingKey).execute(amoCommand);
       send(new ShardStoreReply(amoResult), amoCommand.address());
+      assertGuard();
     }
   }
 
   private void processNewConfig(AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     ShardConfig shardConfigNew = ((NewConfig)amoCommand.command()).shardConfig();
 
     // TODO: may be able to assert that config in decision is at most one higher than current config
@@ -514,6 +545,9 @@ public class ShardStoreServer extends ShardStoreNode {
         }
       }
     } else {
+      if (isSomeTxnOngoing()) {
+        return;
+      }
       assertWithThrow(!isSomeTxnOngoing(), "S3.processNewConfig: handle case where new config comes but txn ongoing");
 
       setupReconfigDS(shardConfigNew);
@@ -521,9 +555,12 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // take on the new configuration (which must be higher)
     this.shardConfigLatest = shardConfigNew;
+    assertGuard();
   }
 
   private void processTransaction(@NonNull AMOCommand amoTransaction, boolean isReplicated) {
+    assertGuard();
+
     assertWithThrow(amoTransaction.command() instanceof Transaction, "S3.processTransaction: called with wrong command type");
 
     if (isReconfigOngoing()) {
@@ -536,22 +573,29 @@ public class ShardStoreServer extends ShardStoreNode {
     // check if this group is managing the transaction (coordinator)
     Transaction transaction = (Transaction) amoTransaction.command();
     if (!isManagingCommand(transaction)) {
+      // logger.info("processTransaction: not managing transaction " + transaction);
+      return;
+    }
+
+    // logger.info("processTransaction: managing transaction " + transaction + " in config " + this.shardConfigLatest);
+
+    // already acquired locks for transaction (ongoing), can just continue with it
+    if (locksAcquiredAsCoordinator(amoTransaction)) {
+      // logger.info("processTransaction: already have locks acquired as coordinator (ongoing): " + amoTransaction);
       return;
     }
 
     // if the transaction has already been executed, then reply back to the client
     if (isTxnAlreadyExecuted(amoTransaction)) {
+      assertWithThrow(!locksAcquiredAsCoordinator(amoTransaction), "S3.processTransaction: should not send reply until locks released");
       send(new ShardStoreReply(getResultOfTransaction(amoTransaction)), amoTransaction.address());
-      return;
-    }
-
-    // already acquired locks for transaction (ongoing), can just continue with it
-    if (locksAcquiredAsCoordinator(amoTransaction)) {
+      // logger.info("processTransaction: transaction already executed, sent " + getResultOfTransaction(amoTransaction) + " for transaction " + amoTransaction + " to " + amoTransaction.address());
       return;
     }
 
     // drop the transaction if this group cannot acquire the locks for it
     if (!canAcquireLocks(amoTransaction)) {
+      // logger.info("processTransaction: cannot acquire locks on " + amoTransaction);
       return;
     }
     assertWithThrow(canAcquireLocks(amoTransaction), "S3.processTransaction: handle case where locks cannot be acquired");
@@ -563,12 +607,17 @@ public class ShardStoreServer extends ShardStoreNode {
 
       if (getTransactionParticipants(transaction, this.shardConfigLatest).size() == 1) {
         // this group can execute the entire transaction at once (no 2PC case)
+        // logger.info("processTransaction: uni-group transaction " + amoTransaction);
         txnDecomposeAndExecute(amoTransaction, getValuesOfKeysManagedInTxn(amoTransaction));
+        // logger.info("processTransaction: result of transaction is " + getResultOfTransaction(amoTransaction));
         send(new ShardStoreReply(getResultOfTransaction(amoTransaction)), amoTransaction.address());
+        // logger.info("processTransaction: sent transaction " + amoTransaction + " to " + amoTransaction.address());
+        assertGuard();
       } else {
         // 2PC case, this group is the coordinator, setup DS, and send prepares to all participants
         assertWithThrow(!this.transactionsOngoingAsCoord.containsKey(amoTransaction), "S3.processTransaction: starting new txn but it's already ongoing");
 
+        // logger.info("processTransaction: cross-group begin: " + amoTransaction);
         this.transactionsOngoingAsCoord.put(amoTransaction, new ImmutablePair<>(new HashSet<>(), new HashSet<>()));
         sendAllExceptSelf(
             new ShardStoreTPCPrepare(
@@ -577,11 +626,15 @@ public class ShardStoreServer extends ShardStoreNode {
             getTransactionParticipants(transaction, this.shardConfigLatest),
             true
         );
+        // logger.info("processTransaction: cross-group sent: " + amoTransaction);
+        assertGuard();
       }
     }
   }
 
   private void processTPCPrepare(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCPrepare tpcPrepare = (TPCPrepare) amoCommand.command();
     Transaction transaction = (Transaction) tpcPrepare.amoTransaction().command();
 
@@ -592,6 +645,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // can drop transaction if already executed (duplicated prepare)
     if (isTxnAlreadyExecuted(tpcPrepare.amoTransaction())) {
+      // logger.info("processTPCPrepare: already executed " + tpcPrepare.amoTransaction());
       return;
     }
 
@@ -602,9 +656,14 @@ public class ShardStoreServer extends ShardStoreNode {
     // if the config num is the same, cannot be the coordinator of the transaction if another group sent Prepare
     if (!locksAcquiredAsParticipant(tpcPrepare.amoTransaction())) {
       assertWithThrow(!locksAcquiredAsCoordinator(tpcPrepare.amoTransaction()), "S3.processTPCPrepare: for transaction T, this group and the sender cannot simultaneously be coordinator (BAD)");
+      if (!canAcquireLocks(tpcPrepare.amoTransaction())) {
+        // logger.info("processTPCPrepare: not ongoing, and CANNOT acquire locks " + tpcPrepare.amoTransaction());
+        return;
+      }
       assertWithThrow(canAcquireLocks(tpcPrepare.amoTransaction()), "S3.processTPCPrepare: locks cannot be acquired (should send abort)"); // TODO: abort
     }
 
+    // logger.info("processTPCPrepare: not ongoing, can acquire locks, start again " + tpcPrepare.amoTransaction());
 
     this.transactionsOngoingAsPart.add(tpcPrepare.amoTransaction()); // this acquires locks (if not acquired already)
     ShardStoreTPCPrepareOk tpcPrepareOk = new ShardStoreTPCPrepareOk(
@@ -617,9 +676,13 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // reply only to the coordinator
     sendToGroup(tpcPrepareOk, tpcPrepare.groupIdCoord);
+    // logger.info("processTPCPrepare: sent " + tpcPrepareOk + " to coordinator");
+    assertGuard();
   }
 
   private void processTPCPrepareOk(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCPrepareOk tpcPrepareOk = (TPCPrepareOk) amoCommand.command();
     Transaction transaction = (Transaction) tpcPrepareOk.amoTransaction().command();
 
@@ -632,6 +695,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // TODO: think about this more (as the locks may still be acquired, want to be careful about not having hanging locks)
     if (isTxnAlreadyExecuted(tpcPrepareOk.amoTransaction())) {
+      // logger.info("processTPCPrepareOk: txn already executed " + tpcPrepareOk);
       return;
     }
 
@@ -645,10 +709,13 @@ public class ShardStoreServer extends ShardStoreNode {
 
     HashSet<TPCPrepareOk> prepareOks = this.transactionsOngoingAsCoord.get(tpcPrepareOk.amoTransaction()).getLeft();
     prepareOks.add(tpcPrepareOk);
+    // logger.info("processTPCPrepareOk: Added " + tpcPrepareOk.amoTransaction() + " to prepareOks. Current size " + prepareOks.size());
 
     // once every other group has sent back a PrepareOk, this group (coordinator) can COMMIT
     // the transaction by executing it, then sending a COMMIT message to all
     if (prepareOks.size() == getTransactionParticipants(transaction, this.shardConfigLatest).size() - 1) {
+
+      // logger.info("processTPCPrepareOk: got all Oks, committing transaction " + tpcPrepareOk);
 
       MultiGetResult valuesOfKeysMerged = getValuesOfKeysManagedInTxn(tpcPrepareOk.amoTransaction());
       for (TPCPrepareOk prepareOkReceived : prepareOks) {
@@ -656,6 +723,7 @@ public class ShardStoreServer extends ShardStoreNode {
         valuesOfKeysMerged.values().putAll(prepareOkReceived.valuesOfTxnKeys().values());
       }
 
+      // logger.info("processTPCPrepareOk: collected values for Txn, about to execute");
       // execute TXN, send COMMIT to all other groups involved in TXN
       txnDecomposeAndExecute(tpcPrepareOk.amoTransaction(), valuesOfKeysMerged);
       sendAllExceptSelf(
@@ -666,10 +734,15 @@ public class ShardStoreServer extends ShardStoreNode {
           getTransactionParticipants(transaction, this.shardConfigLatest),
           true
       );
+      // logger.info("processTPCPrepareOk: sent to all groups " + getTransactionParticipants(transaction, this.shardConfigLatest) + " in txn");
     }
+
+    assertGuard();
   }
 
   private void processTPCCommit(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCCommit tpcCommit = (TPCCommit) amoCommand.command();
     Transaction transaction = (Transaction) tpcCommit.amoTransaction().command();
 
@@ -686,8 +759,10 @@ public class ShardStoreServer extends ShardStoreNode {
     );
 
     if (!locksAcquiredAsParticipant(tpcCommit.amoTransaction())) {
+      // logger.info("processTPCCommit: locks no longer acquired on committed transaction " + tpcCommit);
       assertWithThrow(isTxnAlreadyExecuted(tpcCommit.amoTransaction()), "S3.processTPCCommit: locks released, but committed transaction not already executed (BAD)");
       sendToGroup(commitOkMsg, tpcCommit.groupIdCoord());
+      // logger.info("processTPCCommit: sent redundant commit ok back");
       return;
     }
 
@@ -695,12 +770,18 @@ public class ShardStoreServer extends ShardStoreNode {
     assertWithThrow(!isReconfigOngoing(), "S3.processTPCCommit: reconfiguration ongoing (should not be possible at this point)");
     assertWithThrow(!isTxnAlreadyExecuted(tpcCommit.amoTransaction()), "S3.processTPCCommit: somehow locks acquired, but txn already executed ("+ tpcCommit.amoTransaction().address()+","+tpcCommit.amoTransaction()+",      "+this.transactionsAlreadyExecuted+",       "+this.transactionsOngoingAsPart+")");
 
+    // logger.info("processTPCCommit: executing transaction " + tpcCommit);
     txnDecomposeAndExecute(tpcCommit.amoTransaction(), tpcCommit.valuesOfTxnKeys());
     this.transactionsOngoingAsPart.remove(tpcCommit.amoTransaction());
     sendToGroup(commitOkMsg, tpcCommit.groupIdCoord());
+    // logger.info("processTPCCommit: removed transaction " + tpcCommit + " from ongoing as participant");
+
+    assertGuard();
   }
 
   private void processTPCCommitOk(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCCommitOk tpcCommitOk = (TPCCommitOk) amoCommand.command();
     Transaction transaction = (Transaction) tpcCommitOk.amoTransaction().command();
     Address client = tpcCommitOk.amoTransaction().address();
@@ -714,8 +795,10 @@ public class ShardStoreServer extends ShardStoreNode {
     // replicated after this point:
 
     if (!locksAcquiredAsCoordinator(tpcCommitOk.amoTransaction())) {
+      // logger.info("processTPCCommitOk: locks no longer acquired on committed transaction " + tpcCommitOk);
       assertWithThrow(isTxnAlreadyExecuted(tpcCommitOk.amoTransaction()), "S3.processTPCCommitOk: locks released on committed transaction, but not already executed (BAD)");
       send(new ShardStoreReply(getResultOfTransaction(tpcCommitOk.amoTransaction())), client);
+      // logger.info("processTPCCommitOk: sent back result of transaction to " + client);
       return;
     }
 
@@ -723,13 +806,19 @@ public class ShardStoreServer extends ShardStoreNode {
     assertWithThrow(this.shardConfigLatest.configNum() == tpcCommitOk.configNum(), "S3.processTPCCommit: config num mismatch (config in commit must be smaller)");
 
 
+    // logger.info("processTPCCommitOk: adding CommitOk to CommitOks received " + tpcCommitOk);
     HashSet<TPCCommitOk> commitOks = this.transactionsOngoingAsCoord.get(tpcCommitOk.amoTransaction()).getRight();
     commitOks.add(tpcCommitOk);
+    // logger.info("processTPCCommitOk: currently have " + commitOks.size());
 
     if (commitOks.size() == getTransactionParticipants(transaction, this.shardConfigLatest).size() - 1) {
+      // logger.info("processTPCCommitOk: got all commitOks");
       this.transactionsOngoingAsCoord.remove(tpcCommitOk.amoTransaction()); // releases locks
       send(new ShardStoreReply(getResultOfTransaction(tpcCommitOk.amoTransaction())), client);
+      // logger.info("processTPCCommitOk: removed transaction " + tpcCommitOk + " from ongoing as coord");
     }
+
+    assertGuard();
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -1087,9 +1176,26 @@ public class ShardStoreServer extends ShardStoreNode {
     return this.shardConfigLatest.configNum() + 1;
   }
 
+  private void assertGuard() {
+    this.transactionsOngoingAsPart.forEach(txn -> {
+      assertWithThrow(!isManagingCommand(txn.command()), "S3.assertGuard: managing command but participant");
+      assertWithThrow(!isTxnAlreadyExecuted(txn), "S3.assertGuard: Somehow " +txn+" already executed but ongoing");
+    });
+  }
+
   public void assertWithThrow(boolean b, String m) {
     if (!b) {
       new Exception().printStackTrace(System.out);
+      System.out.println("System State:" + '\n'
+          + "Group ID: " + this.groupId + '\n'
+          + "Server ID: " + this.address() + '\n'
+          + "Config: " + this.shardConfigLatest + "\n"
+          + "App Shards: " + this.amoApplicationSharded.keySet() + '\n'
+          + "TxnAlreadyExecuted: " + this.transactionsAlreadyExecuted + '\n'
+          + "Coord Ongoing Txn: " + this.transactionsOngoingAsCoord + '\n'
+          + "Part Ongoing Txn: " + this.transactionsOngoingAsPart + '\n'
+          + "Reconfig Ongoing: " + isReconfigOngoing() + '\n'
+      );
       System.out.println(m);
       System.exit(1);
     }

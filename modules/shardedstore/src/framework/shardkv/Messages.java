@@ -5,9 +5,12 @@ import framework.atmostonce.AMOResult;
 import framework.Message;
 import framework.shardkv.ShardStoreServer.ShardMove;
 import framework.shardkv.ShardStoreServer.ShardMoveAck;
+import framework.shardkv.ShardStoreServer.TPCAbort;
+import framework.shardkv.ShardStoreServer.TPCAbortOk;
 import framework.shardkv.ShardStoreServer.TPCCommit;
 import framework.shardkv.ShardStoreServer.TPCCommitOk;
 import framework.shardkv.ShardStoreServer.TPCPrepare;
+import framework.shardkv.ShardStoreServer.TPCPrepareAbort;
 import framework.shardkv.ShardStoreServer.TPCPrepareOk;
 import framework.shardmaster.ShardMaster.ShardConfig;
 import lombok.Data;
@@ -53,4 +56,19 @@ final class ShardStoreTPCCommit implements Message {
 @Data
 final class ShardStoreTPCCommitOk implements Message {
   private final TPCCommitOk tpcCommitOk;
+}
+
+@Data
+final class ShardStoreTPCPrepareAbort implements Message {
+  private final TPCPrepareAbort tpcPrepareAbort;
+}
+
+@Data
+final class ShardStoreTPCAbort implements Message {
+  private final TPCAbort tpcAbort;
+}
+
+@Data
+final class ShardStoreTPCAbortOk implements Message {
+  private final TPCAbortOk tpcAbortOk;
 }

@@ -868,6 +868,13 @@ public class ShardStoreServer extends ShardStoreNode {
         valuesOfKeysMerged.values().putAll(prepareOkReceived.valuesOfTxnKeys().values());
       }
 
+      // if keys don't match (can happen with pending config), abort instead of crash
+      if (!transaction.keySet().equals(valuesOfKeysMerged.values().keySet())) {
+        coordState.setAborted(true);
+        sendAbortToAllParticipants(existingAttempt, transaction);
+        return;
+      }
+
       // execute TXN, send COMMIT to all other groups involved in TXN
       txnDecomposeAndExecute(txnAttempt.amoTransaction(), valuesOfKeysMerged);
       sendAllExceptSelf(

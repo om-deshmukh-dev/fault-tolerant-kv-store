@@ -642,19 +642,7 @@ public class ShardStoreServer extends ShardStoreNode {
       if (isSomeTxnOngoing()) {
         this.newConfigSeenWhileTxnOngoing = true;
         this.pendingNewConfigCommand = amoCommand;
-        // TODO: add back in
-        // abort ongoing transactions as coordinator that are NOT yet in commit phase
-//        for (TransactionAttempt txnAttempt : this.transactionsOngoingAsCoord.keySet()) {
-//          TxnCoordState coordState = this.transactionsOngoingAsCoord.get(txnAttempt);
-//          Transaction transaction = (Transaction) txnAttempt.amoTransaction().command();
-//          int numParticipants = getTransactionParticipants(transaction, this.shardConfigLatest).size();
-//          // only abort if not all PrepareOks received (not yet in commit phase)
-//          boolean inCommitPhase = coordState.prepareOksReceived().size() >= numParticipants - 1; // TODO: should be equal to
-//          if (!coordState.isAborted() && !inCommitPhase) {
-//            coordState.setAborted(true);
-//            sendAbortToAllParticipants(txnAttempt, transaction);
-//          }
-//        }
+        // TODO: add back in aborting ongoing transactions
         return;
       }
 
@@ -966,20 +954,19 @@ public class ShardStoreServer extends ShardStoreNode {
     }
 
     TxnCoordState coordState = this.transactionsOngoingAsCoord.get(existingAttempt);
-    // assertWithThrow(txnAttempt.retryNum() == existingAttempt.retryNum(), "S3.processTPCCommitOk: retry number mismatch");
-    // assertWithThrow(!coordState.isAborted(), "S3.processTPCCommitOk: transaction is aborted, should not receive CommitOk");
-    if (txnAttempt.retryNum() != existingAttempt.retryNum() || coordState.isAborted()) {
-      return;
-    }
-    // assertWithThrow(!isReconfigOngoing(), "S3.processTPCCommitOk: reconfiguration ongoing (should not be possible at this point)");
-    // assertWithThrow(tpcCommitOk.configNum() <= this.shardConfigLatest.configNum(), "S3.processTPCCommitOk: config num in CommitOk must be at most current config");
-    // participant may have moved to a higher config after committing, which is fine
 
+    assertWithThrow(txnAttempt.retryNum() == existingAttempt.retryNum(), "S3.processTPCCommitOk: retry number mismatch");
+    assertWithThrow(!coordState.isAborted(), "S3.processTPCCommitOk: transaction is aborted, should not receive CommitOk");
+    assertWithThrow(!isReconfigOngoing(), "S3.processTPCCommitOk: reconfiguration ongoing (should not be possible at this point)");
+
+    // participant may have moved to a higher config after committing, which is fine
     HashSet<TPCCommitOk> commitOks = coordState.commitOksReceived();
     commitOks.add(tpcCommitOk);
 
     if (commitOks.size() == getTransactionParticipants(transaction, this.shardConfigLatest).size() - 1) {
       this.transactionsOngoingAsCoord.remove(existingAttempt); // releases locks
+
+      assertWithThrow(!locksAcquiredAsCoordinator(txnAttempt.amoTransaction()), "S3.processTPCCommitOk: only send reply once locks released");
       send(new ShardStoreReply(getResultOfTransaction(txnAttempt.amoTransaction())), client);
 
       // if no more ongoing transactions (as coordinator), re-process pending config
@@ -1037,6 +1024,7 @@ public class ShardStoreServer extends ShardStoreNode {
     } else {
       // config number is higher, participant saw a new config
       this.newConfigSeenWhileTxnOngoing = true;
+      // TODO: what is the new config? (could be problematic once the last transaction finishes)
       coordState.setAborted(true);
       sendAbortToAllParticipants(existingAttempt, transaction);
     }
@@ -1168,15 +1156,18 @@ public class ShardStoreServer extends ShardStoreNode {
       return;
     }
 
-    assertWithThrow(this.pendingNewConfigCommand.command() instanceof NewConfig, "S3.processPendingConfig: must be NewConfig");
-    NewConfig newConfigPending = (NewConfig) this.pendingNewConfigCommand.command();
-    assertWithThrow(this.shardConfigLatest.configNum() == newConfigPending.shardConfig().configNum() - 1,
-                    "S3.processPendingConfig: pending config must be exactly one higher");
+    // TODO: add back in
+    return;
 
-    AMOCommand pendingConfig = this.pendingNewConfigCommand;
-    this.pendingNewConfigCommand = null;
-    this.newConfigSeenWhileTxnOngoing = false;
-    processNewConfig(pendingConfig, true);
+//    assertWithThrow(this.pendingNewConfigCommand.command() instanceof NewConfig, "S3.processPendingConfig: must be NewConfig");
+//    NewConfig newConfigPending = (NewConfig) this.pendingNewConfigCommand.command();
+//    assertWithThrow(this.shardConfigLatest.configNum() == newConfigPending.shardConfig().configNum() - 1,
+//                    "S3.processPendingConfig: pending config must be exactly one higher");
+//
+//    AMOCommand pendingConfig = this.pendingNewConfigCommand;
+//    this.pendingNewConfigCommand = null;
+//    this.newConfigSeenWhileTxnOngoing = false;
+//    processNewConfig(pendingConfig, true);
   }
 
   // Update transactionsAlreadyExecuted to contain this transaction for the client which sent it

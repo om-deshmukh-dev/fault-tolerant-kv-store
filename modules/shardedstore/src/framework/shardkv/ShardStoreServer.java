@@ -558,7 +558,9 @@ public class ShardStoreServer extends ShardStoreNode {
     }
 
     // TODO: make sure the lock on this key is not acquired already
-    assertWithThrow(!isSomeTxnOngoing(), "S3.processSingleKeyCommand: should check that the key in the command is not locked");
+    if (isSomeTxnOngoing()) {
+      return;
+    }
 
     // check if this group is managing the shard
     SingleKeyCommand singleKeyCommand = (SingleKeyCommand) amoCommand.command();
@@ -622,6 +624,7 @@ public class ShardStoreServer extends ShardStoreNode {
       // initial configuration case
       assertWithThrow(shardConfigNew.configNum() == ShardMaster.INITIAL_CONFIG_NUM,
                       "S3.processNewConfig: config empty but not getting INITIAL_CONFIG");
+      assertWithThrow(!isSomeTxnOngoing(), "S3.processNewConfig: null config but txn ongoing");
 
       // this group manages all the shards, initialize sharded AMO app accordingly
       if (shardConfigNew.groupInfo().containsKey(this.groupId)) {
@@ -639,18 +642,19 @@ public class ShardStoreServer extends ShardStoreNode {
       if (isSomeTxnOngoing()) {
         this.newConfigSeenWhileTxnOngoing = true;
         this.pendingNewConfigCommand = amoCommand;
+        // TODO: add back in
         // abort ongoing transactions as coordinator that are NOT yet in commit phase
-        for (TransactionAttempt txnAttempt : this.transactionsOngoingAsCoord.keySet()) {
-          TxnCoordState coordState = this.transactionsOngoingAsCoord.get(txnAttempt);
-          Transaction transaction = (Transaction) txnAttempt.amoTransaction().command();
-          int numParticipants = getTransactionParticipants(transaction, this.shardConfigLatest).size();
-          // only abort if not all PrepareOks received (not yet in commit phase)
-          boolean inCommitPhase = coordState.prepareOksReceived().size() >= numParticipants - 1;
-          if (!coordState.isAborted() && !inCommitPhase) {
-            coordState.setAborted(true);
-            sendAbortToAllParticipants(txnAttempt, transaction);
-          }
-        }
+//        for (TransactionAttempt txnAttempt : this.transactionsOngoingAsCoord.keySet()) {
+//          TxnCoordState coordState = this.transactionsOngoingAsCoord.get(txnAttempt);
+//          Transaction transaction = (Transaction) txnAttempt.amoTransaction().command();
+//          int numParticipants = getTransactionParticipants(transaction, this.shardConfigLatest).size();
+//          // only abort if not all PrepareOks received (not yet in commit phase)
+//          boolean inCommitPhase = coordState.prepareOksReceived().size() >= numParticipants - 1; // TODO: should be equal to
+//          if (!coordState.isAborted() && !inCommitPhase) {
+//            coordState.setAborted(true);
+//            sendAbortToAllParticipants(txnAttempt, transaction);
+//          }
+//        }
         return;
       }
 
@@ -665,6 +669,8 @@ public class ShardStoreServer extends ShardStoreNode {
   }
 
   private void processTransaction(@NonNull AMOCommand amoTransaction, boolean isReplicated) {
+    assertGuard();
+
     assertWithThrow(amoTransaction.command() instanceof Transaction, "S3.processTransaction: called with wrong command type");
 
     if (isReconfigOngoing()) {
@@ -677,6 +683,8 @@ public class ShardStoreServer extends ShardStoreNode {
     if (!isManagingCommand(transaction)) {
       return;
     }
+
+    assertWithThrow(getOngoingTxnAttemptAsPart(amoTransaction) == null, "S3.processTransaction: managing command but txn ongoing as part");
 
     // if the transaction has already been executed, then reply back to the client
     if (isTxnAlreadyExecuted(amoTransaction)) {
@@ -709,6 +717,7 @@ public class ShardStoreServer extends ShardStoreNode {
         // this group can execute the entire transaction at once (no 2PC case)
         txnDecomposeAndExecute(amoTransaction, getValuesOfKeysManagedInTxn(amoTransaction));
         send(new ShardStoreReply(getResultOfTransaction(amoTransaction)), amoTransaction.address());
+        assertGuard();
       } else {
         // 2PC case, this group is the coordinator, setup DS, and send prepares to all participants
         TransactionAttempt txnAttempt = new TransactionAttempt(amoTransaction, 0);
@@ -722,11 +731,14 @@ public class ShardStoreServer extends ShardStoreNode {
             getTransactionParticipants(transaction, this.shardConfigLatest),
             true
         );
+        assertGuard();
       }
     }
   }
 
   private void processTPCPrepare(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCPrepare tpcPrepare = (TPCPrepare) amoCommand.command();
     TransactionAttempt txnAttempt = tpcPrepare.txnAttempt();
     Transaction transaction = (Transaction) txnAttempt.amoTransaction().command();
@@ -756,6 +768,7 @@ public class ShardStoreServer extends ShardStoreNode {
     // assertWithThrow(this.shardConfigLatest != null && tpcPrepare.configNum() == this.shardConfigLatest.configNum(), "S3.processTPCPrepare: config mismatch (send abort)");
     // send PrepareAbort if config num does not match
     if (this.shardConfigLatest == null || tpcPrepare.configNum() != this.shardConfigLatest.configNum()) {
+      // TODO: careful about using -1 (but it seems ok)
       int configNumToSend = this.shardConfigLatest != null ? this.shardConfigLatest.configNum() : -1;
       sendToGroup(
           new ShardStoreTPCPrepareAbort(
@@ -772,20 +785,21 @@ public class ShardStoreServer extends ShardStoreNode {
     TransactionAttempt existingAttempt = getOngoingTxnAttemptAsPart(txnAttempt.amoTransaction());
     if (existingAttempt != null) {
       // if incoming retry # is higher, update the attempt
-      if (txnAttempt.retryNum() > existingAttempt.retryNum()) {
+      if (txnAttempt.retryNum() >= existingAttempt.retryNum()) {
         this.transactionsOngoingAsPart.remove(existingAttempt);
         this.transactionsOngoingAsPart.add(txnAttempt);
+
+        // send back PrepareOk (could have been lost)
+        TransactionAttempt attemptToUse = txnAttempt.retryNum() >= existingAttempt.retryNum() ? txnAttempt : existingAttempt;
+        ShardStoreTPCPrepareOk tpcPrepareOk = new ShardStoreTPCPrepareOk(
+            new TPCPrepareOk(
+                this.groupId, this.shardConfigLatest.configNum(),
+                attemptToUse,
+                getValuesOfKeysManagedInTxn(attemptToUse.amoTransaction())
+            )
+        );
+        sendToGroup(tpcPrepareOk, tpcPrepare.groupIdCoord());
       }
-      // send back PrepareOk (could have been lost)
-      TransactionAttempt attemptToUse = txnAttempt.retryNum() >= existingAttempt.retryNum() ? txnAttempt : existingAttempt;
-      ShardStoreTPCPrepareOk tpcPrepareOk = new ShardStoreTPCPrepareOk(
-          new TPCPrepareOk(
-              this.groupId, this.shardConfigLatest.configNum(),
-              attemptToUse,
-              getValuesOfKeysManagedInTxn(attemptToUse.amoTransaction())
-          )
-      );
-      sendToGroup(tpcPrepareOk, tpcPrepare.groupIdCoord());
       return;
     }
 
@@ -816,9 +830,12 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // reply only to the coordinator
     sendToGroup(tpcPrepareOk, tpcPrepare.groupIdCoord());
+    assertGuard();
   }
 
   private void processTPCPrepareOk(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCPrepareOk tpcPrepareOk = (TPCPrepareOk) amoCommand.command();
     TransactionAttempt txnAttempt = tpcPrepareOk.txnAttempt();
     Transaction transaction = (Transaction) txnAttempt.amoTransaction().command();
@@ -842,17 +859,19 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // can only accept PrepareOk with matching retry number
     if (txnAttempt.retryNum() != existingAttempt.retryNum()) {
+      assertWithThrow(txnAttempt.retryNum() < existingAttempt.retryNum(), "S3.processTPCPrepareOk: Participant somehow on larger retry");
       return;
     }
 
     TxnCoordState coordState = this.transactionsOngoingAsCoord.get(existingAttempt);
+    // TODO: looks good
     // assertWithThrow(!coordState.isAborted(), "S3.processTPCPrepareOk: transaction is aborted, should not receive PrepareOk");
     if (coordState.isAborted()) {
       return;
     }
 
-    assertWithThrow(!isReconfigOngoing(), "S3.processTPCPrepareOk: reconfig ongoing (config nums should not match then)");
-    assertWithThrow(tpcPrepareOk.configNum() <= this.shardConfigLatest.configNum(), "S3.processTPCPrepareOk: config num in PrepareOk must be at most current config");
+    assertWithThrow(!isReconfigOngoing(), "S3.processTPCPrepareOk: reconfig ongoing (transaction should not be ongoing at this point then)");
+    assertWithThrow(tpcPrepareOk.configNum() == this.shardConfigLatest.configNum(), "S3.processTPCPrepareOk: config num in PrepareOk must be equal (for txn to be ongoing, at same retry #)");
     assertWithThrow(isManagingCommand(transaction), "S3.processTPCPrepareOk: got prepare ok but not manager (coordinator) of transaction");
 
     HashSet<TPCPrepareOk> prepareOks = coordState.prepareOksReceived();
@@ -873,15 +892,18 @@ public class ShardStoreServer extends ShardStoreNode {
       sendAllExceptSelf(
           new ShardStoreTPCCommit(
               new TPCCommit(this.groupId, this.shardConfigLatest.configNum(),
-                  existingAttempt, valuesOfKeysMerged)
+                  txnAttempt, valuesOfKeysMerged)
           ),
           getTransactionParticipants(transaction, this.shardConfigLatest),
           true
       );
     }
+    assertGuard();
   }
 
   private void processTPCCommit(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCCommit tpcCommit = (TPCCommit) amoCommand.command();
     TransactionAttempt txnAttempt = tpcCommit.txnAttempt();
     Transaction transaction = (Transaction) txnAttempt.amoTransaction().command();
@@ -900,40 +922,29 @@ public class ShardStoreServer extends ShardStoreNode {
 
     TransactionAttempt existingAttempt = getOngoingTxnAttemptAsPart(txnAttempt.amoTransaction());
     if (existingAttempt == null) {
-      // assertWithThrow(isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCCommit: locks released, but committed transaction not already executed (BAD)");
-      if (isTxnAlreadyExecuted(txnAttempt.amoTransaction())) {
-        sendToGroup(commitOkMsg, tpcCommit.groupIdCoord());
-      }
-      return;
-    }
-
-    // assertWithThrow(txnAttempt.retryNum() == existingAttempt.retryNum(), "S3.processTPCCommit: retry number mismatch");
-    if (txnAttempt.retryNum() != existingAttempt.retryNum()) {
-      return;
-    }
-    assertWithThrow(this.shardConfigLatest.configNum() == tpcCommit.configNum(), "S3.processTPCCommit: config num mismatch");
-    assertWithThrow(!isReconfigOngoing(), "S3.processTPCCommit: reconfiguration ongoing (should not be possible at this point)");
-    // assertWithThrow(!isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCCommit: somehow locks acquired, but txn already executed");
-    if (isTxnAlreadyExecuted(txnAttempt.amoTransaction())) {
-      this.transactionsOngoingAsPart.remove(existingAttempt);
+      assertWithThrow(isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCCommit: locks released, but committed transaction not already executed (BAD)");
       sendToGroup(commitOkMsg, tpcCommit.groupIdCoord());
       return;
     }
+
+    assertWithThrow(txnAttempt.retryNum() == existingAttempt.retryNum(), "S3.processTPCCommit: retry number mismatch");
+    assertWithThrow(this.shardConfigLatest.configNum() == tpcCommit.configNum(), "S3.processTPCCommit: config num mismatch");
+    assertWithThrow(!isReconfigOngoing(), "S3.processTPCCommit: reconfiguration ongoing (should not be possible at this point)");
+    assertWithThrow(!isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCCommit: somehow locks acquired, but txn already executed ("+existingAttempt+","+txnAttempt+")");
 
     txnDecomposeAndExecute(txnAttempt.amoTransaction(), tpcCommit.valuesOfTxnKeys());
     this.transactionsOngoingAsPart.remove(existingAttempt);
     sendToGroup(commitOkMsg, tpcCommit.groupIdCoord());
 
     // if no more ongoing transactions (as participant), re-process pending config
-    if (!isSomeTxnOngoing() && this.pendingNewConfigCommand != null) {
-      AMOCommand pendingConfig = this.pendingNewConfigCommand;
-      this.pendingNewConfigCommand = null;
-      this.newConfigSeenWhileTxnOngoing = false;
-      processNewConfig(pendingConfig, true);
-    }
+    if (!isSomeTxnOngoing()) { processPendingConfig(); }
+
+    assertGuard();
   }
 
   private void processTPCCommitOk(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCCommitOk tpcCommitOk = (TPCCommitOk) amoCommand.command();
     TransactionAttempt txnAttempt = tpcCommitOk.txnAttempt();
     Transaction transaction = (Transaction) txnAttempt.amoTransaction().command();
@@ -972,16 +983,14 @@ public class ShardStoreServer extends ShardStoreNode {
       send(new ShardStoreReply(getResultOfTransaction(txnAttempt.amoTransaction())), client);
 
       // if no more ongoing transactions (as coordinator), re-process pending config
-      if (!isSomeTxnOngoing() && this.pendingNewConfigCommand != null) {
-        AMOCommand pendingConfig = this.pendingNewConfigCommand;
-        this.pendingNewConfigCommand = null;
-        this.newConfigSeenWhileTxnOngoing = false;
-        processNewConfig(pendingConfig, true);
-      }
+      if (!isSomeTxnOngoing()) { processPendingConfig(); }
     }
+    assertGuard();
   }
 
   private void processTPCPrepareAbort(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCPrepareAbort tpcPrepareAbort = (TPCPrepareAbort) amoCommand.command();
     TransactionAttempt txnAttempt = tpcPrepareAbort.txnAttempt();
     Transaction transaction = (Transaction) txnAttempt.amoTransaction().command();
@@ -1045,18 +1054,6 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // replicated after this point:
 
-    // assertWithThrow(!isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCAbort: transaction should not be already executed");
-    // if transaction already executed, still send AbortOk to unblock coordinator
-    if (isTxnAlreadyExecuted(txnAttempt.amoTransaction())) {
-      sendToGroup(
-          new ShardStoreTPCAbortOk(
-              new TPCAbortOk(this.groupId, this.shardConfigLatest.configNum(), txnAttempt)
-          ),
-          tpcAbort.groupIdCoord()
-      );
-      return;
-    }
-
     TransactionAttempt existingAttempt = getOngoingTxnAttemptAsPart(txnAttempt.amoTransaction());
     if (existingAttempt == null) {
       // locks already released, still send AbortOk in case the previous one was lost
@@ -1070,15 +1067,11 @@ public class ShardStoreServer extends ShardStoreNode {
     }
 
     if (txnAttempt.retryNum() != existingAttempt.retryNum()) {
-      // stale abort, send AbortOk anyway
-      sendToGroup(
-          new ShardStoreTPCAbortOk(
-              new TPCAbortOk(this.groupId, this.shardConfigLatest.configNum(), txnAttempt)
-          ),
-          tpcAbort.groupIdCoord()
-      );
+      assertWithThrow(txnAttempt.retryNum() < existingAttempt.retryNum(), "S3.processTPCAbort: coordinator of txn somehow on larger retry #");
       return;
     }
+
+    assertWithThrow(!isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCAbort: transaction should not be already executed");
 
     // release locks and send AbortOk
     this.transactionsOngoingAsPart.remove(existingAttempt);
@@ -1090,15 +1083,13 @@ public class ShardStoreServer extends ShardStoreNode {
     );
 
     // if no more ongoing transactions (as participant), re-process pending config
-    if (!isSomeTxnOngoing() && this.pendingNewConfigCommand != null) {
-      AMOCommand pendingConfig = this.pendingNewConfigCommand;
-      this.pendingNewConfigCommand = null;
-      this.newConfigSeenWhileTxnOngoing = false;
-      processNewConfig(pendingConfig, true);
-    }
+    if (!isSomeTxnOngoing()) { processPendingConfig(); }
+    assertGuard();
   }
 
   private void processTPCAbortOk(@NonNull AMOCommand amoCommand, boolean isReplicated) {
+    assertGuard();
+
     TPCAbortOk tpcAbortOk = (TPCAbortOk) amoCommand.command();
     TransactionAttempt txnAttempt = tpcAbortOk.txnAttempt();
     Transaction transaction = (Transaction) txnAttempt.amoTransaction().command();
@@ -1116,16 +1107,16 @@ public class ShardStoreServer extends ShardStoreNode {
       return;
     }
 
+    if (txnAttempt.retryNum() != existingAttempt.retryNum()) {
+      assertWithThrow(txnAttempt.retryNum() < existingAttempt.retryNum(), "S3.processTPCAbortOk: participant of txn somehow on larger retry #");
+      return;
+    }
+
     // config numbers do not matter here as a mismatch may have caused the abort
     TxnCoordState coordState = this.transactionsOngoingAsCoord.get(existingAttempt);
-    // assertWithThrow(coordState.isAborted(), "S3.processTPCAbortOk: transaction should be marked as aborted");
-    if (!coordState.isAborted()) {
-      return;
-    }
-    // assertWithThrow(!isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCAbortOk: transaction should not already be executed");
-    if (isTxnAlreadyExecuted(txnAttempt.amoTransaction())) {
-      return;
-    }
+
+    assertWithThrow(coordState.isAborted(), "S3.processTPCAbortOk: transaction should be marked as aborted");
+    assertWithThrow(!isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCAbortOk: transaction should not already be executed");
     assertWithThrow(!isReconfigOngoing(), "S3.processTPCAbortOk: reconfig should not be ongoing");
 
     HashSet<TPCAbortOk> abortOks = coordState.abortOksReceived();
@@ -1138,12 +1129,7 @@ public class ShardStoreServer extends ShardStoreNode {
         this.transactionsOngoingAsCoord.remove(existingAttempt);
 
         // if no more ongoing transactions, re-process the pending new config
-        if (!isSomeTxnOngoing() && this.pendingNewConfigCommand != null) {
-          AMOCommand pendingConfig = this.pendingNewConfigCommand;
-          this.pendingNewConfigCommand = null;
-          this.newConfigSeenWhileTxnOngoing = false;
-          processNewConfig(pendingConfig, true);
-        }
+        if (!isSomeTxnOngoing()) { processPendingConfig(); }
       } else {
         // retry the transaction with incremented retry number
         TransactionAttempt newAttempt = new TransactionAttempt(txnAttempt.amoTransaction(), existingAttempt.retryNum() + 1);
@@ -1160,11 +1146,38 @@ public class ShardStoreServer extends ShardStoreNode {
         );
       }
     }
+    assertGuard();
   }
 
   /* -----------------------------------------------------------------------------------------------
    *  Core Helpers
    * ---------------------------------------------------------------------------------------------*/
+
+  private void assertGuard() {
+    this.transactionsOngoingAsPart.forEach(txn -> {
+      assertWithThrow(!isManagingCommand(txn.amoTransaction().command()), "S3.assertGuard: managing command but participant");
+      assertWithThrow(!isTxnAlreadyExecuted(txn.amoTransaction()), "S3.assertGuard: Somehow " +txn+" already executed but ongoing");
+    });
+  }
+
+  // Processes a pending configuration, if it exists. This should only be called if no further
+  // transactions are ongoing at this group.
+  private void processPendingConfig() {
+    assertWithThrow(!isSomeTxnOngoing(), "S3.processPendingConfig: no txn should be ongoing");
+    if (this.pendingNewConfigCommand == null) {
+      return;
+    }
+
+    assertWithThrow(this.pendingNewConfigCommand.command() instanceof NewConfig, "S3.processPendingConfig: must be NewConfig");
+    NewConfig newConfigPending = (NewConfig) this.pendingNewConfigCommand.command();
+    assertWithThrow(this.shardConfigLatest.configNum() == newConfigPending.shardConfig().configNum() - 1,
+                    "S3.processPendingConfig: pending config must be exactly one higher");
+
+    AMOCommand pendingConfig = this.pendingNewConfigCommand;
+    this.pendingNewConfigCommand = null;
+    this.newConfigSeenWhileTxnOngoing = false;
+    processNewConfig(pendingConfig, true);
+  }
 
   // Update transactionsAlreadyExecuted to contain this transaction for the client which sent it
   private void setTxnAlreadyExecutedHelper(AMOCommand amoTransaction, KVStoreResult kvStoreResult) {
@@ -1459,20 +1472,8 @@ public class ShardStoreServer extends ShardStoreNode {
     return shardConfig.groupInfo().get(groupIdGetShards).getRight();
   }
 
-  private boolean isNoOverlapInTxnKeySetCoord(AMOCommand amoCommand, Set<TransactionAttempt> txnAttemptsWithLocksAcq) {
-    assertWithThrow(amoCommand.command() instanceof Transaction, "S3.isNoOverlapInTxnKeySetCoord: command must be txn");
-    // assertWithThrow(txnAttemptsWithLocksAcq.stream().allMatch(t -> t.amoTransaction().command() instanceof Transaction), "S3.isNoOverlapInTxnKeySet: commands in transaction set must be transactions");
-
-    Transaction transaction = (Transaction) amoCommand.command();
-
-    return txnAttemptsWithLocksAcq.stream().allMatch(txnAttemptLocked -> {
-      Transaction transactionLockAcq = (Transaction) txnAttemptLocked.amoTransaction().command();
-      return Sets.intersection(transaction.keySet(), transactionLockAcq.keySet()).isEmpty();
-    });
-  }
-
-  private boolean isNoOverlapInTxnKeySetPart(AMOCommand amoCommand, Set<TransactionAttempt> txnAttemptsWithLocksAcq) {
-    assertWithThrow(amoCommand.command() instanceof Transaction, "S3.isNoOverlapInTxnKeySetPart: command must be txn");
+  private boolean isNoOverlapInTxnKeySet(AMOCommand amoCommand, Set<TransactionAttempt> txnAttemptsWithLocksAcq) {
+    assertWithThrow(amoCommand.command() instanceof Transaction, "S3.isNoOverlapInTxnKeySet: command must be txn");
     // assertWithThrow(txnAttemptsWithLocksAcq.stream().allMatch(t -> t.amoTransaction().command() instanceof Transaction), "S3.isNoOverlapInTxnKeySet: commands in transaction set must be transactions");
 
     Transaction transaction = (Transaction) amoCommand.command();
@@ -1489,8 +1490,8 @@ public class ShardStoreServer extends ShardStoreNode {
     assertWithThrow(getOngoingTxnAttemptAsCoord(amoTransaction) == null && getOngoingTxnAttemptAsPart(amoTransaction) == null,
                     "S3.canAcquireLocks: locks already acquired for transaction, should not check again");
 
-    return isNoOverlapInTxnKeySetCoord(amoTransaction, this.transactionsOngoingAsCoord.keySet())
-        && isNoOverlapInTxnKeySetPart(amoTransaction, this.transactionsOngoingAsPart);
+    return isNoOverlapInTxnKeySet(amoTransaction, this.transactionsOngoingAsCoord.keySet())
+        && isNoOverlapInTxnKeySet(amoTransaction, this.transactionsOngoingAsPart);
   }
 
   // returns the TransactionAttempt if the transaction is ongoing as participant, otherwise null
@@ -1607,6 +1608,17 @@ public class ShardStoreServer extends ShardStoreNode {
     if (!b) {
       new Exception().printStackTrace(System.out);
       System.out.println(m);
+      System.out.println("System State:" + '\n'
+          + "Group ID: " + this.groupId + '\n'
+          + "Config: " + this.shardConfigLatest + "\n"
+          + "App Shards: " + this.amoApplicationSharded.keySet() + '\n'
+          + "TxnAlreadyExecuted: " + this.transactionsAlreadyExecuted + '\n'
+          + "Coord Ongoing Txn: " + this.transactionsOngoingAsCoord + '\n'
+          + "Part Ongoing Txn: " + this.transactionsOngoingAsPart + '\n'
+          + "New Config Seen While Txn?: " + this.newConfigSeenWhileTxnOngoing + '\n'
+          + "Pending New Config: " + this.pendingNewConfigCommand + '\n'
+          + "Reconfig Ongoing: " + isReconfigOngoing() + '\n'
+      );
       System.exit(1);
     }
   }

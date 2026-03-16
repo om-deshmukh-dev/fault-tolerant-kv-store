@@ -43,6 +43,7 @@ import lombok.EqualsAndHashCode;
 import lombok.NonNull;
 import lombok.ToString;
 import org.apache.commons.lang3.tuple.ImmutablePair;
+import org.apache.commons.lang3.tuple.MutablePair;
 import org.apache.commons.lang3.tuple.Pair;
 
 @ToString(callSuper = true)
@@ -61,7 +62,7 @@ public class ShardStoreServer extends ShardStoreNode {
   private ShardConfig shardConfigLatest;
 
   // Data structures for 2PC (TWO PHASE COMMIT)
-  private final HashMap<Address, AMOExecution> transactionsAlreadyExecuted;
+  private final HashMap<Address, AlreadyExecutedState> transactionsAlreadyExecuted;
   private final HashMap<TransactionAttempt, TxnCoordState> transactionsOngoingAsCoord;
   private final HashSet<TransactionAttempt> transactionsOngoingAsPart;
   private boolean newConfigSeenWhileTxnOngoing;
@@ -79,7 +80,7 @@ public class ShardStoreServer extends ShardStoreNode {
     private final int groupIdSender; // the group that sent the shards (the group that gets this message is gaining shards)
     private final int configNum;
     private final Map<Integer, AMOApplication<Application>> amoAppShards;
-    private final Map<Address, AMOExecution> transactionsAlreadyExecutedSender;
+    private final Map<Address, AlreadyExecutedState> transactionsAlreadyExecutedSender;
   }
 
   @Data
@@ -263,6 +264,17 @@ public class ShardStoreServer extends ShardStoreNode {
     public HashSet<TPCAbortOk> abortOksReceived() { return abortOksReceived; }
     public boolean isAborted() { return isAborted; }
     public void setAborted(boolean aborted) { this.isAborted = aborted; }
+  }
+
+  @Data
+  public static final class AlreadyExecutedState {
+    private AMOExecution amoExecution;
+    private boolean isCommandCommittedByAllParticipants;
+
+    public AlreadyExecutedState(AMOExecution amoExecution, boolean isCommandCommittedByAllParticipants) {
+      this.amoExecution = amoExecution;
+      this.isCommandCommittedByAllParticipants = isCommandCommittedByAllParticipants;
+    }
   }
 
   /* -----------------------------------------------------------------------------------------------
@@ -525,11 +537,15 @@ public class ShardStoreServer extends ShardStoreNode {
 
       // merge the transaction state from the ShardMove message
       shardMoveToUs.transactionsAlreadyExecutedSender().forEach((client, execution) -> {
-        if (!this.transactionsAlreadyExecuted.containsKey(client)
-          || this.transactionsAlreadyExecuted.get(client).amoCommand().sequenceNum() < execution.amoCommand().sequenceNum()
-        ) {
-            this.transactionsAlreadyExecuted.put(client, execution);
-        }
+        assertWithThrow(false, "S3.processShardMoveCommand: merging unimplemented");
+//        if (!this.transactionsAlreadyExecuted.containsKey(client)
+//          || this.transactionsAlreadyExecuted.get(client).getLeft().amoCommand().sequenceNum() < execution.getLeft().amoCommand().sequenceNum()
+//        ) {
+//            if (execution.getRight()) {
+//              assertWithThrow(false, "GAHHH finally found out the issue");
+//            }
+//            this.transactionsAlreadyExecuted.put(client, execution);
+//        }
       });
 
       // remove group from ReconfigMovesNeeded, and send Ack with this group's group ID embedded
@@ -676,7 +692,7 @@ public class ShardStoreServer extends ShardStoreNode {
 
     // if the transaction has already been executed, then reply back to the client
     if (isTxnAlreadyExecuted(amoTransaction)) {
-      send(new ShardStoreReply(getResultOfTransaction(amoTransaction)), amoTransaction.address());
+      sendResultToClientIfProven(amoTransaction);
       return;
     }
 
@@ -704,7 +720,8 @@ public class ShardStoreServer extends ShardStoreNode {
       if (getTransactionParticipants(transaction, this.shardConfigLatest).size() == 1) {
         // this group can execute the entire transaction at once (no 2PC case)
         txnDecomposeAndExecute(amoTransaction, getValuesOfKeysManagedInTxn(amoTransaction));
-        send(new ShardStoreReply(getResultOfTransaction(amoTransaction)), amoTransaction.address());
+        getResultOfTransaction(amoTransaction).isCommandCommittedByAllParticipants(true);
+        sendResultToClientIfProven(amoTransaction);
         assertGuard();
       } else {
         // 2PC case, this group is the coordinator, setup DS, and send prepares to all participants
@@ -949,7 +966,7 @@ public class ShardStoreServer extends ShardStoreNode {
     if (existingAttempt == null) {
       // transaction no longer ongoing as coordinator, must have already completed
       assertWithThrow(isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCCommitOk: locks released on committed transaction, but not already executed (BAD)");
-      send(new ShardStoreReply(getResultOfTransaction(txnAttempt.amoTransaction())), client);
+      sendResultToClientIfProven(txnAttempt.amoTransaction());
       return;
     }
 
@@ -967,7 +984,8 @@ public class ShardStoreServer extends ShardStoreNode {
       this.transactionsOngoingAsCoord.remove(existingAttempt); // releases locks
 
       assertWithThrow(!locksAcquiredAsCoordinator(txnAttempt.amoTransaction()), "S3.processTPCCommitOk: only send reply once locks released");
-      send(new ShardStoreReply(getResultOfTransaction(txnAttempt.amoTransaction())), client);
+      getResultOfTransaction(txnAttempt.amoTransaction()).isCommandCommittedByAllParticipants(true);
+      sendResultToClientIfProven(txnAttempt.amoTransaction());
 
       // if no more ongoing transactions (as coordinator), re-process pending config
       if (!isSomeTxnOngoing()) { processPendingConfig(); }
@@ -1172,12 +1190,15 @@ public class ShardStoreServer extends ShardStoreNode {
 
   // Update transactionsAlreadyExecuted to contain this transaction for the client which sent it
   private void setTxnAlreadyExecutedHelper(AMOCommand amoTransaction, KVStoreResult kvStoreResult) {
-    assertWithThrow(!this.transactionsAlreadyExecuted.containsKey(amoTransaction.address())
-            || this.transactionsAlreadyExecuted.get(amoTransaction.address()).amoCommand().sequenceNum() < amoTransaction.sequenceNum(),
-        "S3.setTransactionsAlreadyExecutedHelper: transaction must be new (not already executed)");
+    assertWithThrow(!isTxnAlreadyExecuted(amoTransaction), "S3.setTransactionsAlreadyExecutedHelper: transaction must be new (not already executed)");
 
     AMOResult amoResult = new AMOResult(kvStoreResult, amoTransaction.sequenceNum());
-    this.transactionsAlreadyExecuted.put(amoTransaction.address(), new AMOExecution(amoTransaction, amoResult));
+    this.transactionsAlreadyExecuted.put(
+        amoTransaction.address(),
+        new AlreadyExecutedState(
+            new AMOExecution(amoTransaction, amoResult), false
+        )
+    );
   }
 
   // Decomposes a transaction into the set of MultiCommands associated with the keys this group
@@ -1233,10 +1254,15 @@ public class ShardStoreServer extends ShardStoreNode {
     }
   }
 
-  private AMOResult getResultOfTransaction(AMOCommand amoTransaction) {
+  private AlreadyExecutedState getResultOfTransaction(AMOCommand amoTransaction) {
     assertWithThrow(isTxnAlreadyExecuted(amoTransaction), "S3.getResultOfTransaction: must already be executed");
-    AMOExecution amoExecutionLatest = this.transactionsAlreadyExecuted.get(amoTransaction.address());
-    return amoExecutionLatest.amoResult();
+    return this.transactionsAlreadyExecuted.get(amoTransaction.address());
+  }
+
+  private void sendResultToClientIfProven(AMOCommand amoTransaction) {
+    if (getResultOfTransaction(amoTransaction).isCommandCommittedByAllParticipants()) {
+      send(new ShardStoreReply(getResultOfTransaction(amoTransaction).amoExecution().amoResult()), amoTransaction.address());
+    }
   }
 
   // process commands that were queued during reconfiguration
@@ -1451,7 +1477,7 @@ public class ShardStoreServer extends ShardStoreNode {
     // is at least as large as the seq num in the command
     return this.transactionsAlreadyExecuted.get(
         amoTransaction.address()
-    ).amoResult().sequenceNum() >= amoTransaction.sequenceNum();
+    ).amoExecution().amoResult().sequenceNum() >= amoTransaction.sequenceNum();
   }
 
   // returns the set of shards that the group in the argument manages, or returns emptyset

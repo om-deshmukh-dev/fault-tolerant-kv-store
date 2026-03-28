@@ -537,15 +537,25 @@ public class ShardStoreServer extends ShardStoreNode {
 
       // merge the transaction state from the ShardMove message
       shardMoveToUs.transactionsAlreadyExecutedSender().forEach((client, execution) -> {
-        assertWithThrow(false, "S3.processShardMoveCommand: merging unimplemented");
-//        if (!this.transactionsAlreadyExecuted.containsKey(client)
-//          || this.transactionsAlreadyExecuted.get(client).getLeft().amoCommand().sequenceNum() < execution.getLeft().amoCommand().sequenceNum()
-//        ) {
-//            if (execution.getRight()) {
-//              assertWithThrow(false, "GAHHH finally found out the issue");
-//            }
-//            this.transactionsAlreadyExecuted.put(client, execution);
-//        }
+        if (!this.transactionsAlreadyExecuted.containsKey(client)) {
+          this.transactionsAlreadyExecuted.put(client, execution);
+          return;
+        }
+
+        AlreadyExecutedState alreadyExecutedStateOld = this.transactionsAlreadyExecuted.get(client);
+
+        if (alreadyExecutedStateOld.amoExecution().amoCommand().sequenceNum() < execution.amoExecution().amoCommand().sequenceNum()) {
+          // for a given client, take on higher sequence number (as some other server must have been able
+          // to prove commitment and send a reply back to the client)
+          this.transactionsAlreadyExecuted.put(client, execution);
+        }
+        else if (alreadyExecutedStateOld.amoExecution().amoCommand().sequenceNum() == execution.amoExecution().amoCommand().sequenceNum()) {
+          // some other server (old coordinator) may have proven this transaction was committed by all
+          AlreadyExecutedState alreadyExecutedStateUpdated = new AlreadyExecutedState(execution.amoExecution(),
+              alreadyExecutedStateOld.isCommandCommittedByAllParticipants() || execution.isCommandCommittedByAllParticipants()
+          );
+          this.transactionsAlreadyExecuted.put(client, alreadyExecutedStateUpdated);
+        }
       });
 
       // remove group from ReconfigMovesNeeded, and send Ack with this group's group ID embedded
@@ -1121,7 +1131,12 @@ public class ShardStoreServer extends ShardStoreNode {
     // config numbers do not matter here as a mismatch may have caused the abort
     TxnCoordState coordState = this.transactionsOngoingAsCoord.get(existingAttempt);
 
-    assertWithThrow(coordState.isAborted(), "S3.processTPCAbortOk: transaction should be marked as aborted");
+    if (!coordState.isAborted()) {
+      assertWithThrow(this.shardConfigLatest.configNum() != tpcAbortOk.configNum(), "S3.processTPCAbortOk: config num match, but AbortOk sent somehow");
+      return;
+    }
+
+    // assertWithThrow(coordState.isAborted(), "S3.processTPCAbortOk: transaction should be marked as aborted");
     assertWithThrow(!isTxnAlreadyExecuted(txnAttempt.amoTransaction()), "S3.processTPCAbortOk: transaction should not already be executed");
     assertWithThrow(!isReconfigOngoing(), "S3.processTPCAbortOk: reconfig should not be ongoing");
 
